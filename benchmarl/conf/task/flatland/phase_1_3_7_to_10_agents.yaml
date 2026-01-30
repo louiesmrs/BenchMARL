@@ -1,0 +1,9 @@
+defaults:
+  - flatland_phase_1_3_7_to_10_agents_config
+  - _self_
+
+curriculum_path: "curriculums/jiang_phases_1_3_7_to_10_agents_30x30.json"
+map_width: 30
+map_height: 30
+num_agents: 10
+num_steps: 200
