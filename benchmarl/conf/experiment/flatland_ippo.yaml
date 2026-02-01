@@ -1,0 +1,26 @@
+defaults:
+  - experiment_config
+  - _self_
+
+sampling_device: "cpu"
+train_device: "cpu"
+
+share_policy_params: true
+prefer_continuous_actions: false
+
+lr: 0.00025
+adam_eps: 0.00000001
+clip_grad_norm: true
+clip_grad_val: 0.2
+
+max_n_frames: 1_000_000
+on_policy_collected_frames_per_batch: 2000
+on_policy_n_envs_per_worker: 10
+on_policy_n_minibatch_iters: 4
+on_policy_minibatch_size: 200
+
+loggers: [tensorboard]
+create_json: false
+
+checkpoint_interval: 120000
+checkpoint_at_end: true

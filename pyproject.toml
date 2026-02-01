@@ -2,3 +2,22 @@
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "benchmarl"
+version = "0.0.0"
+description = "BenchMARL extension with Flatland support"
+requires-python = ">=3.10,<3.12"
+
+dependencies = [
+  "flatland-rl==4.0.1",
+  "torchrl~=0.10",
+  "tqdm",
+  "hydra-core",
+  "torchvision",
+  "av<14",
+  "numpy",
+]
+
+[tool.setuptools]
+packages = ["benchmarl"]
