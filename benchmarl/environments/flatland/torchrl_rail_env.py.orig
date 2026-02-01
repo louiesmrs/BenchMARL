@@ -1,0 +1,568 @@
+<<<<<<< HEAD
+from typing import NamedTuple, Optional
+
+import torch
+from flatland.envs.agent_utils import EnvAgent
+from flatland.envs.rail_env import RailEnv
+from flatland.envs.step_utils.states import TrainState
+from tensordict import TensorDict
+from torchrl.data.tensor_specs import Categorical, Composite, UnboundedContinuous, UnboundedDiscrete
+from torchrl.envs.common import EnvBase
+
+RewardCoefs = NamedTuple(
+    "RewardCoefs",
+    [
+        ("delay_reward", int),
+        ("shortest_path_reward", int),
+        ("arrival_reward", int),
+        ("deadlock_penalty", int),
+        ("departure_reward", int),
+        ("arrival_delay_penalty", int),
+    ],
+)
+
+
+class TDRailEnv(RailEnv):
+    """Rail Env that accepts and returns TensorDicts."""
+
+    def __init__(self, *args, obs_only: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.reward_coefs: Optional[RewardCoefs] = None
+        self.previous_deadlocked: set
+        self.obs_only = obs_only
+
+    def obs_to_td(self, obs_list: list) -> TensorDict:
+        num_agents = self.get_num_agents()
+        obs_td: TensorDict = TensorDict(
+            {
+                "agents_attr": torch.tensor(obs_list[0], dtype=torch.float32),
+                "node_attr": torch.tensor(obs_list[1][0], dtype=torch.float32),
+                "adjacency": torch.tensor(obs_list[1][1], dtype=torch.int64),
+                "node_order": torch.tensor(obs_list[1][2], dtype=torch.int64),
+                "edge_order": torch.tensor(obs_list[1][3], dtype=torch.int64),
+            },
+            [num_agents],
+        )
+        return obs_td
+
+    def reset(
+        self,
+        regenerate_rail: bool = True,
+        regenerate_schedule: bool = True,
+        *,
+        random_seed: int = None,
+    ) -> TensorDict:
+        observations, _ = super().reset(
+            regenerate_rail=regenerate_rail,
+            regenerate_schedule=regenerate_schedule,
+            random_seed=random_seed,
+        )
+        num_agents = self.get_num_agents()
+        tensordict_out: TensorDict = TensorDict({}, batch_size=[])
+        tensordict_out["agents"] = TensorDict({}, batch_size=[num_agents])
+        obs_td = self.obs_to_td(observations)
+        if self.obs_only:
+            obs_td = TensorDict(
+                {"agents_attr": obs_td.get("agents_attr")},
+                batch_size=[num_agents],
+            )
+        tensordict_out["agents"]["observation"] = obs_td
+
+        if not self.obs_only:
+            _, _, valid_actions = self.obs_builder.get_properties()
+            tensordict_out["agents"]["observation"]["valid_actions"] = torch.tensor(
+                valid_actions, dtype=torch.bool
+            )
+        tensordict_out["agents"]["reward"] = torch.zeros(
+            num_agents, dtype=torch.float32
+        )
+        tensordict_out["done"] = torch.tensor([False])
+        tensordict_out["terminated"] = tensordict_out["done"].clone()
+        tensordict_out["agents"]["done"] = tensordict_out["done"].expand(num_agents, -1)
+        tensordict_out["agents"]["terminated"] = tensordict_out["terminated"].expand(num_agents, -1)
+        tensordict_out["reward"] = (
+            tensordict_out["agents"]["reward"].mean().unsqueeze(0)
+        )
+
+        self.previous_deadlocked = self.motionCheck.svDeadlocked
+        return tensordict_out
+
+    def step(self, tensordict: TensorDict) -> TensorDict:
+        actions = {
+            handle: action.item()
+            for handle, action in enumerate(tensordict["agents"]["action"].flatten())
+        }
+        observations, rewards, done, _ = super().step(actions)
+        _, _, valid_actions = self.obs_builder.get_properties()
+        num_agents = self.get_num_agents()
+
+        return_td: TensorDict = TensorDict({}, batch_size=[])
+        return_td["agents"] = TensorDict({}, batch_size=[num_agents])
+        obs_td = self.obs_to_td(observations)
+        if self.obs_only:
+            obs_td = TensorDict(
+                {"agents_attr": obs_td.get("agents_attr")},
+                batch_size=[num_agents],
+            )
+        return_td["agents"]["observation"] = obs_td
+        return_td["agents"]["reward"] = torch.tensor(
+            [value for _, value in rewards.items()], dtype=torch.float32
+        )
+        done_tensor = torch.tensor(done["__all__"], dtype=torch.bool)
+        if done_tensor.ndim == 0:
+            done_tensor = done_tensor.unsqueeze(0)
+        return_td["done"] = done_tensor
+        return_td["terminated"] = done_tensor.clone()
+        return_td["agents"]["done"] = done_tensor.expand(num_agents, -1)
+        return_td["agents"]["terminated"] = done_tensor.expand(num_agents, -1)
+        return_td["reward"] = return_td["agents"]["reward"].mean().unsqueeze(0)
+        if not self.obs_only:
+            return_td["agents"]["observation"]["valid_actions"] = torch.tensor(
+                valid_actions, dtype=torch.bool
+            )
+        return return_td
+
+    def update_step_rewards(self, i_agent: int) -> None:
+        if self.reward_coefs is None:
+            return
+
+        agent: EnvAgent = self.agents[i_agent]
+        delay_reward = 0
+        shortest_path_reward = 0
+        arrival_reward = 0
+        deadlock_penalty = 0
+        departure_reward = 0
+        arrival_delay_penalty = 0
+
+        if self.reward_coefs.delay_reward != 0:
+            if (
+                agent.earliest_departure <= self._elapsed_steps
+                and agent.state != TrainState.DONE
+            ):
+                delay_reward = min(
+                    agent.get_current_delay(self._elapsed_steps, self.distance_map), 0
+                )
+
+        if self.reward_coefs.shortest_path_reward != 0:
+            if (
+                agent.earliest_departure <= self._elapsed_steps
+                and agent.state != TrainState.DONE
+            ):
+                shortest_path_reward = agent.get_current_delay(
+                    self._elapsed_steps, self.distance_map
+                )
+
+        if self.reward_coefs.arrival_reward != 0:
+            if (
+                agent.state == TrainState.DONE
+                and agent.state_machine.previous_state != TrainState.DONE
+                and self._elapsed_steps <= agent.latest_arrival
+            ):
+                arrival_reward = 1
+
+        if self.reward_coefs.deadlock_penalty != 0:
+            if (agent.position in self.motionCheck.svDeadlocked) and (
+                agent.position not in self.previous_deadlocked
+            ):
+                deadlock_penalty = -1
+
+        if self.reward_coefs.departure_reward != 0:
+            if (
+                agent.state.is_on_map_state()
+                and agent.state_machine.previous_state.is_off_map_state()
+            ):
+                departure_reward = 1
+
+        if self.reward_coefs.arrival_delay_penalty != 0:
+            if (
+                agent.state == TrainState.DONE
+                and agent.state_machine.previous_state != TrainState.DONE
+            ):
+                arrival_delay_penalty = min(
+                    agent.get_current_delay(self._elapsed_steps, self.distance_map), 0
+                )
+
+        self.rewards_dict[i_agent] += (
+            self.reward_coefs.delay_reward * delay_reward
+            + self.reward_coefs.shortest_path_reward * shortest_path_reward
+            + self.reward_coefs.arrival_reward * arrival_reward
+            + self.reward_coefs.deadlock_penalty * deadlock_penalty
+            + self.reward_coefs.departure_reward * departure_reward
+            + self.reward_coefs.arrival_delay_penalty * arrival_delay_penalty
+        )
+
+    def set_reward_coef(self, reward_coefs: dict) -> None:
+        if reward_coefs is not None:
+            self.reward_coefs = RewardCoefs(**reward_coefs)
+
+    def _handle_end_reward(self, agent: EnvAgent) -> int:
+        if self.reward_coefs is None:
+            return super()._handle_end_reward(agent)
+        if agent.state == TrainState.DONE:
+            return 0
+        if self.reward_coefs.arrival_delay_penalty != 0:
+            return min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0)
+        return 0
+
+
+class TorchRLRailEnv(EnvBase):
+    """TorchRL-conform environment for a given TDRailEnv."""
+
+    def __init__(self, env: TDRailEnv, obs_only: bool = False):
+        super().__init__()
+        self.env = env
+        self.num_agents = env.get_num_agents()
+        self.obs_only = obs_only
+        self._make_spec()
+        self.rng: Optional[int] = None
+
+    def _set_seed(self, seed: Optional[int]) -> None:
+        self.rng = torch.manual_seed(seed)
+
+    def _make_spec(self) -> None:
+        if self.obs_only:
+            observation = Composite(
+                agents_attr=UnboundedContinuous(
+                    shape=[self.num_agents, 83], dtype=torch.float32
+                ),
+                shape=[self.num_agents],
+            )
+        else:
+            observation = Composite(
+                agents_attr=UnboundedContinuous(shape=[83], dtype=torch.float32),
+                adjacency=UnboundedDiscrete(shape=[30, 3], dtype=torch.int64),
+                node_attr=UnboundedDiscrete(shape=[31, 12], dtype=torch.float32),
+                node_order=UnboundedDiscrete(shape=[31], dtype=torch.int64),
+                edge_order=UnboundedDiscrete(shape=[30], dtype=torch.int64),
+                valid_actions=Categorical(n=2, shape=[5], dtype=torch.bool),
+                shape=[self.num_agents],
+            )
+        self.observation_spec = Composite(
+            agents=Composite(
+                observation=observation,
+                shape=[self.num_agents],
+            ),
+            shape=[],
+        )
+        self.done_spec = Composite(
+            agents=Composite(
+                done=Categorical(n=2, dtype=torch.bool, shape=[1]),
+                terminated=Categorical(n=2, dtype=torch.bool, shape=[1]),
+                shape=[self.num_agents],
+            ),
+            done=Categorical(n=2, dtype=torch.bool, shape=[1]),
+            terminated=Categorical(n=2, dtype=torch.bool, shape=[1]),
+            shape=[],
+        )
+        self.action_spec = Composite(
+            agents=Composite(
+                action=Categorical(n=5, shape=[], dtype=torch.int64),
+                shape=[self.num_agents],
+            ),
+            shape=[],
+        )
+        self.reward_spec = Composite(
+            agents=Composite(
+                reward=UnboundedContinuous(shape=[], dtype=torch.float32),
+                shape=[self.num_agents],
+            ),
+            reward=UnboundedContinuous(shape=[1], dtype=torch.float32),
+            shape=[],
+        )
+
+    def _reset(self, tensordict: TensorDict = None) -> TensorDict:
+        return self.env.reset()
+
+    def _step(self, tensordict: TensorDict) -> TensorDict:
+        return self.env.step(tensordict)
+||||||| parent of 6738486 (flatland env still broken)
+=======
+from typing import NamedTuple, Optional
+
+import torch
+from flatland.envs.agent_utils import EnvAgent
+from flatland.envs.rail_env import RailEnv
+from flatland.envs.step_utils.states import TrainState
+from tensordict import TensorDict
+from torchrl.data.tensor_specs import Categorical, Composite, UnboundedContinuous, UnboundedDiscrete
+from torchrl.envs.common import EnvBase
+
+RewardCoefs = NamedTuple(
+    "RewardCoefs",
+    [
+        ("delay_reward", int),
+        ("shortest_path_reward", int),
+        ("arrival_reward", int),
+        ("deadlock_penalty", int),
+        ("departure_reward", int),
+        ("arrival_delay_penalty", int),
+    ],
+)
+
+
+class TDRailEnv(RailEnv):
+    """Rail Env that accepts and returns TensorDicts."""
+
+    def __init__(self, *args, obs_only: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.reward_coefs: Optional[RewardCoefs] = None
+        self.previous_deadlocked: set
+        self.obs_only = obs_only
+
+    def obs_to_td(self, obs_list: list) -> TensorDict:
+        num_agents = self.get_num_agents()
+        obs_td: TensorDict = TensorDict(
+            {
+                "agents_attr": torch.tensor(obs_list[0], dtype=torch.float32),
+                "node_attr": torch.tensor(obs_list[1][0], dtype=torch.float32),
+                "adjacency": torch.tensor(obs_list[1][1], dtype=torch.int64),
+                "node_order": torch.tensor(obs_list[1][2], dtype=torch.int64),
+                "edge_order": torch.tensor(obs_list[1][3], dtype=torch.int64),
+            },
+            [num_agents],
+        )
+        return obs_td
+
+    def reset(
+        self,
+        regenerate_rail: bool = True,
+        regenerate_schedule: bool = True,
+        *,
+        random_seed: int = None,
+    ) -> TensorDict:
+        observations, _ = super().reset(
+            regenerate_rail=regenerate_rail,
+            regenerate_schedule=regenerate_schedule,
+            random_seed=random_seed,
+        )
+        num_agents = self.get_num_agents()
+        tensordict_out: TensorDict = TensorDict({}, batch_size=[])
+        tensordict_out["agents"] = TensorDict({}, batch_size=[num_agents])
+        obs_td = self.obs_to_td(observations)
+        if self.obs_only:
+            obs_td = TensorDict(
+                {"agents_attr": obs_td.get("agents_attr")},
+                batch_size=[num_agents],
+            )
+        tensordict_out["agents"]["observation"] = obs_td
+
+        if not self.obs_only:
+            _, _, valid_actions = self.obs_builder.get_properties()
+            tensordict_out["agents"]["observation"]["valid_actions"] = torch.tensor(
+                valid_actions, dtype=torch.bool
+            )
+        tensordict_out["agents"]["reward"] = torch.zeros(
+            num_agents, dtype=torch.float32
+        )
+        tensordict_out["done"] = torch.tensor([False])
+        tensordict_out["terminated"] = tensordict_out["done"].clone()
+        tensordict_out["agents"]["done"] = tensordict_out["done"].expand(num_agents, -1)
+        tensordict_out["agents"]["terminated"] = tensordict_out["terminated"].expand(num_agents, -1)
+        tensordict_out["reward"] = (
+            tensordict_out["agents"]["reward"].mean().unsqueeze(0)
+        )
+
+        self.previous_deadlocked = self.motionCheck.svDeadlocked
+        return tensordict_out
+
+    def step(self, tensordict: TensorDict) -> TensorDict:
+        actions = {
+            handle: action.item()
+            for handle, action in enumerate(tensordict["agents"]["action"].flatten())
+        }
+        observations, rewards, done, _ = super().step(actions)
+        _, _, valid_actions = self.obs_builder.get_properties()
+        num_agents = self.get_num_agents()
+
+        return_td: TensorDict = TensorDict({}, batch_size=[])
+        return_td["agents"] = TensorDict({}, batch_size=[num_agents])
+        obs_td = self.obs_to_td(observations)
+        if self.obs_only:
+            obs_td = TensorDict(
+                {"agents_attr": obs_td.get("agents_attr")},
+                batch_size=[num_agents],
+            )
+        return_td["agents"]["observation"] = obs_td
+        return_td["agents"]["reward"] = torch.tensor(
+            [value for _, value in rewards.items()], dtype=torch.float32
+        )
+        done_tensor = torch.tensor(done["__all__"], dtype=torch.bool)
+        if done_tensor.ndim == 0:
+            done_tensor = done_tensor.unsqueeze(0)
+        return_td["done"] = done_tensor
+        return_td["terminated"] = done_tensor.clone()
+        return_td["agents"]["done"] = done_tensor.expand(num_agents, -1)
+        return_td["agents"]["terminated"] = done_tensor.expand(num_agents, -1)
+        return_td["reward"] = return_td["agents"]["reward"].mean().unsqueeze(0)
+        if not self.obs_only:
+            return_td["agents"]["observation"]["valid_actions"] = torch.tensor(
+                valid_actions, dtype=torch.bool
+            )
+        return return_td
+
+    def update_step_rewards(self, i_agent: int) -> None:
+        if self.reward_coefs is None:
+            return
+
+        agent: EnvAgent = self.agents[i_agent]
+        delay_reward = 0
+        shortest_path_reward = 0
+        arrival_reward = 0
+        deadlock_penalty = 0
+        departure_reward = 0
+        arrival_delay_penalty = 0
+
+        if self.reward_coefs.delay_reward != 0:
+            if (
+                agent.earliest_departure <= self._elapsed_steps
+                and agent.state != TrainState.DONE
+            ):
+                delay_reward = min(
+                    agent.get_current_delay(self._elapsed_steps, self.distance_map), 0
+                )
+
+        if self.reward_coefs.shortest_path_reward != 0:
+            if (
+                agent.earliest_departure <= self._elapsed_steps
+                and agent.state != TrainState.DONE
+            ):
+                shortest_path_reward = agent.get_current_delay(
+                    self._elapsed_steps, self.distance_map
+                )
+
+        if self.reward_coefs.arrival_reward != 0:
+            if (
+                agent.state == TrainState.DONE
+                and agent.state_machine.previous_state != TrainState.DONE
+                and self._elapsed_steps <= agent.latest_arrival
+            ):
+                arrival_reward = 1
+
+        if self.reward_coefs.deadlock_penalty != 0:
+            if (agent.position in self.motionCheck.svDeadlocked) and (
+                agent.position not in self.previous_deadlocked
+            ):
+                deadlock_penalty = -1
+
+        if self.reward_coefs.departure_reward != 0:
+            if (
+                agent.state.is_on_map_state()
+                and agent.state_machine.previous_state.is_off_map_state()
+            ):
+                departure_reward = 1
+
+        if self.reward_coefs.arrival_delay_penalty != 0:
+            if (
+                agent.state == TrainState.DONE
+                and agent.state_machine.previous_state != TrainState.DONE
+            ):
+                arrival_delay_penalty = min(
+                    agent.get_current_delay(self._elapsed_steps, self.distance_map), 0
+                )
+
+        self.rewards_dict[i_agent] += (
+            self.reward_coefs.delay_reward * delay_reward
+            + self.reward_coefs.shortest_path_reward * shortest_path_reward
+            + self.reward_coefs.arrival_reward * arrival_reward
+            + self.reward_coefs.deadlock_penalty * deadlock_penalty
+            + self.reward_coefs.departure_reward * departure_reward
+            + self.reward_coefs.arrival_delay_penalty * arrival_delay_penalty
+        )
+
+    def set_reward_coef(self, reward_coefs: dict) -> None:
+        if reward_coefs is not None:
+            self.reward_coefs = RewardCoefs(**reward_coefs)
+
+    def _handle_end_reward(self, agent: EnvAgent) -> int:
+        if self.reward_coefs is None:
+            return super()._handle_end_reward(agent)
+        if agent.state == TrainState.DONE:
+            return 0
+        if self.reward_coefs.arrival_delay_penalty != 0:
+            return min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0)
+        return 0
+
+
+class TorchRLRailEnv(EnvBase):
+    """TorchRL-conform environment for a given TDRailEnv."""
+
+    def __init__(self, env: TDRailEnv, obs_only: bool = False):
+        super().__init__()
+        self.env = env
+        self.num_agents = env.get_num_agents()
+        self.obs_only = obs_only
+        self._make_spec()
+        self.rng: Optional[int] = None
+
+    def _set_seed(self, seed: Optional[int]) -> None:
+        self.rng = torch.manual_seed(seed)
+
+    def _make_spec(self) -> None:
+        if self.obs_only:
+            observation = Composite(
+                agents_attr=UnboundedContinuous(
+                    shape=[self.num_agents, 83], dtype=torch.float32
+                ),
+                shape=[self.num_agents],
+            )
+        else:
+            observation = Composite(
+                agents_attr=UnboundedContinuous(
+                    shape=[self.num_agents, 83], dtype=torch.float32
+                ),
+                adjacency=UnboundedDiscrete(
+                    shape=[self.num_agents, 30, 3], dtype=torch.int64
+                ),
+                node_attr=UnboundedDiscrete(
+                    shape=[self.num_agents, 31, 12], dtype=torch.float32
+                ),
+                node_order=UnboundedDiscrete(
+                    shape=[self.num_agents, 31], dtype=torch.int64
+                ),
+                edge_order=UnboundedDiscrete(
+                    shape=[self.num_agents, 30], dtype=torch.int64
+                ),
+                valid_actions=Categorical(
+                    n=2, shape=[self.num_agents, 5], dtype=torch.bool
+                ),
+                shape=[self.num_agents],
+            )
+        self.observation_spec = Composite(
+            agents=Composite(
+                observation=observation,
+                shape=[self.num_agents],
+            ),
+            shape=[],
+        )
+        self.done_spec = Composite(
+            agents=Composite(
+                done=Categorical(n=2, dtype=torch.bool, shape=[1]),
+                terminated=Categorical(n=2, dtype=torch.bool, shape=[1]),
+                shape=[self.num_agents],
+            ),
+            done=Categorical(n=2, dtype=torch.bool, shape=[1]),
+            terminated=Categorical(n=2, dtype=torch.bool, shape=[1]),
+            shape=[],
+        )
+        self.action_spec = Composite(
+            agents=Composite(
+                action=Categorical(n=5, shape=[], dtype=torch.int64),
+                shape=[self.num_agents],
+            ),
+            shape=[],
+        )
+        self.reward_spec = Composite(
+            agents=Composite(
+                reward=UnboundedContinuous(shape=[], dtype=torch.float32),
+                shape=[self.num_agents],
+            ),
+            reward=UnboundedContinuous(shape=[1], dtype=torch.float32),
+            shape=[],
+        )
+
+    def _reset(self, tensordict: TensorDict = None) -> TensorDict:
+        return self.env.reset()
+
+    def _step(self, tensordict: TensorDict) -> TensorDict:
+        return self.env.step(tensordict)
+>>>>>>> 6738486 (flatland env still broken)

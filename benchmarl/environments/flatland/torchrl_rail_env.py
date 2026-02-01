@@ -5,7 +5,12 @@ from flatland.envs.agent_utils import EnvAgent
 from flatland.envs.rail_env import RailEnv
 from flatland.envs.step_utils.states import TrainState
 from tensordict import TensorDict
-from torchrl.data.tensor_specs import Categorical, Composite, UnboundedContinuous, UnboundedDiscrete
+from torchrl.data.tensor_specs import (
+    Categorical,
+    Composite,
+    UnboundedContinuous,
+    UnboundedDiscrete,
+)
 from torchrl.envs.common import EnvBase
 
 RewardCoefs = NamedTuple(
@@ -78,7 +83,9 @@ class TDRailEnv(RailEnv):
         tensordict_out["done"] = torch.tensor([False])
         tensordict_out["terminated"] = tensordict_out["done"].clone()
         tensordict_out["agents"]["done"] = tensordict_out["done"].expand(num_agents, -1)
-        tensordict_out["agents"]["terminated"] = tensordict_out["terminated"].expand(num_agents, -1)
+        tensordict_out["agents"]["terminated"] = tensordict_out["terminated"].expand(
+            num_agents, -1
+        )
         tensordict_out["reward"] = (
             tensordict_out["agents"]["reward"].mean().unsqueeze(0)
         )
@@ -200,7 +207,9 @@ class TDRailEnv(RailEnv):
         if agent.state == TrainState.DONE:
             return 0
         if self.reward_coefs.arrival_delay_penalty != 0:
-            return min(agent.get_current_delay(self._elapsed_steps, self.distance_map), 0)
+            return min(
+                agent.get_current_delay(self._elapsed_steps, self.distance_map), 0
+            )
         return 0
 
 
@@ -228,12 +237,24 @@ class TorchRLRailEnv(EnvBase):
             )
         else:
             observation = Composite(
-                agents_attr=UnboundedContinuous(shape=[83], dtype=torch.float32),
-                adjacency=UnboundedDiscrete(shape=[30, 3], dtype=torch.int64),
-                node_attr=UnboundedDiscrete(shape=[31, 12], dtype=torch.float32),
-                node_order=UnboundedDiscrete(shape=[31], dtype=torch.int64),
-                edge_order=UnboundedDiscrete(shape=[30], dtype=torch.int64),
-                valid_actions=Categorical(n=2, shape=[5], dtype=torch.bool),
+                agents_attr=UnboundedContinuous(
+                    shape=[self.num_agents, 83], dtype=torch.float32
+                ),
+                adjacency=UnboundedDiscrete(
+                    shape=[self.num_agents, 30, 3], dtype=torch.int64
+                ),
+                node_attr=UnboundedDiscrete(
+                    shape=[self.num_agents, 31, 12], dtype=torch.float32
+                ),
+                node_order=UnboundedDiscrete(
+                    shape=[self.num_agents, 31], dtype=torch.int64
+                ),
+                edge_order=UnboundedDiscrete(
+                    shape=[self.num_agents, 30], dtype=torch.int64
+                ),
+                valid_actions=Categorical(
+                    n=2, shape=[self.num_agents, 5], dtype=torch.bool
+                ),
                 shape=[self.num_agents],
             )
         self.observation_spec = Composite(
