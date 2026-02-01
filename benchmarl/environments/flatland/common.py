@@ -4,20 +4,23 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional
 
-import torch
-from torchrl.data.tensor_specs import Composite, Categorical, UnboundedContinuous, UnboundedDiscrete
-from torchrl.envs import EnvBase
+from tensordict import TensorDictBase
 
-from benchmarl.environments.common import TaskClass
+import torch
+from torchrl.data.tensor_specs import Composite
+from torchrl.envs import EnvBase, RewardSum
+
+from benchmarl.environments.common import Task, TaskClass
 
 
 @dataclass
 class TaskConfig:
-    curriculum_path: str
     map_width: int = 30
     map_height: int = 30
     num_agents: int = 10
     num_steps: int = 200
+    reward_coefs: Optional[dict] = None
+    smoke_obs_only: bool = False
 
 
 class FlatlandClass(TaskClass):
@@ -39,7 +42,10 @@ class FlatlandClass(TaskClass):
                 ParamMalfunctionGen,
             )
             from flatland.envs.rail_generators import SparseRailGen
-            from flatland_torchrl.torchrl_rail_env import TDRailEnv, TorchRLRailEnv
+            from benchmarl.environments.flatland.torchrl_rail_env import (
+                TDRailEnv,
+                TorchRLRailEnv,
+            )
 
             td_env = TDRailEnv(
                 number_of_agents=self.config.get("num_agents"),
@@ -58,9 +64,11 @@ class FlatlandClass(TaskClass):
                     )
                 ),
                 obs_builder_object=TreeCutils(31, 500),
+                obs_only=self.config.get("smoke_obs_only", False),
             )
+            td_env.set_reward_coef(self.config.get("reward_coefs"))
             td_env.reset()
-            env = TorchRLRailEnv(td_env)
+            env = TorchRLRailEnv(td_env, obs_only=self.config.get("smoke_obs_only", False))
             return env
 
         return make_env
@@ -82,35 +90,7 @@ class FlatlandClass(TaskClass):
         return {"agents": [str(i) for i in range(num_agents)]}
 
     def observation_spec(self, env: EnvBase) -> Composite:
-        num_agents = self.config.get("num_agents")
-        obs_spec = Composite(
-            agents=Composite(
-                observation=Composite(
-                    agents_attr=UnboundedContinuous(
-                        shape=[num_agents, 83], dtype=torch.float32
-                    ),
-                    adjacency=UnboundedDiscrete(
-                        shape=[num_agents, 30, 3], dtype=torch.int64
-                    ),
-                    node_attr=UnboundedDiscrete(
-                        shape=[num_agents, 31, 12], dtype=torch.float32
-                    ),
-                    node_order=UnboundedDiscrete(
-                        shape=[num_agents, 31], dtype=torch.int64
-                    ),
-                    edge_order=UnboundedDiscrete(
-                        shape=[num_agents, 30], dtype=torch.int64
-                    ),
-                    valid_actions=Categorical(
-                        n=2, shape=[num_agents, 5], dtype=torch.bool
-                    ),
-                    shape=[num_agents],
-                ),
-                shape=[],
-            ),
-            shape=[],
-        )
-        return obs_spec
+        return env.observation_spec.clone()
 
     def info_spec(self, env: EnvBase) -> Optional[Composite]:
         return None
@@ -119,37 +99,44 @@ class FlatlandClass(TaskClass):
         return None
 
     def action_spec(self, env: EnvBase) -> Composite:
-        num_agents = self.config.get("num_agents")
-        return Composite(
-            agents=Composite(
-                action=Categorical(n=5, shape=[num_agents], dtype=torch.int64),
-                shape=[],
-            ),
-            shape=[],
-        )
+        return env.action_spec.clone()
 
     def action_mask_spec(self, env: EnvBase) -> Optional[Composite]:
-        num_agents = self.config.get("num_agents")
-        return Composite(
-            agents=Composite(
-                action_mask=Categorical(n=2, shape=[num_agents, 5], dtype=torch.bool),
-                shape=[],
-            ),
-            shape=[],
-        )
+        return None
 
-
-class FlatlandTask(Enum):
-    PHASE_1_3_7_TO_10_AGENTS = ("phase_1_3_7_to_10_agents", TaskConfig)
+    def get_reward_sum_transform(self, env: EnvBase):
+        return RewardSum(in_keys=[("agents", "reward")], out_keys=["episode_reward"])
 
     @staticmethod
     def env_name() -> str:
         return "flatland"
 
-    @classmethod
-    def _task_class(cls):
-        return FlatlandClass
+    @staticmethod
+    def log_info(batch: TensorDictBase) -> Dict[str, float]:
+        if ("next", "agents", "observation", "agents_attr") not in batch.keys(True, True):
+            return {}
+        done = batch.get(("next", "done")).squeeze(-1)
+        if done.numel() == 0 or not done.any():
+            return {}
+        final_stats = batch.get(("next", "agents", "observation", "agents_attr"))[done]
+        arrival_ratio = final_stats[..., 6].mean().item()
+        deadlock_ratio = final_stats[..., 41].mean().item()
+        return {
+            "collection/info/arrival_ratio": arrival_ratio,
+            "collection/info/deadlock_ratio": deadlock_ratio,
+        }
 
-    @classmethod
-    def _task_config_class(cls, task_name: str):
-        return TaskConfig
+
+class FlatlandTask(Task):
+    """Enum for Flatland tasks."""
+
+    PHASE_1_3_7_TO_10_AGENTS = None
+    PHASE_1 = None
+    PHASE_3 = None
+    PHASE_7 = None
+    PHASE_10 = None
+    SMOKE_2_AGENTS = None
+
+    @staticmethod
+    def associated_class():
+        return FlatlandClass
