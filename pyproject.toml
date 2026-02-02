@@ -17,6 +17,7 @@ dependencies = [
   "torchvision",
   "av<14",
   "numpy",
+  "flatland_cutils @ git+https://github.com/louiesmrs/flatland_cutils.git@refs/heads/main",
 ]
 
 [tool.setuptools]
