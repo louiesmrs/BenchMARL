@@ -125,6 +125,7 @@ class ExperimentConfig:
 
     evaluation_only: bool = False
     experiment_name: Optional[str] = None
+    disable_value_estimator_vmap: bool = False
 
     def train_batch_size(self, on_policy: bool) -> int:
         """

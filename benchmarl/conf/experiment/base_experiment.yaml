@@ -118,6 +118,9 @@ evaluation_only: False
 # Optional explicit experiment name (folder name). If null, an auto-generated name is used.
 experiment_name: null
 
+# Disable functorch vmap in value estimation (useful for debugging/backends with vmap issues)
+disable_value_estimator_vmap: false
+
 # Absolute path to the folder where the experiment will log.
 # If null, this will default to the hydra output dir (if using hydra) or to the current folder when the script is run (if not).
 # If you are reloading an experiment with "restore_file", this will default to the reloaded experiment folder.
