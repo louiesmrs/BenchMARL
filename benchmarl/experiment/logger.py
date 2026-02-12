@@ -179,6 +179,7 @@ class Logger:
         total_frames: int,
         step: int,
         video_frames: Optional[List] = None,
+        max_steps: Optional[int] = None,
     ):
         if (
             not len(self.loggers) and not self.experiment_config.create_json
@@ -202,6 +203,8 @@ class Logger:
 
         to_log = {}
         json_metrics = {}
+        group_returns = []
+        normalized_group_returns = []
         for group in self.group_map.keys():
             # returns has shape (n_episodes)
             returns = torch.stack(
@@ -212,12 +215,32 @@ class Logger:
                 to_log, f"eval/{group}/reward/episode_reward", returns
             )
             json_metrics[group + "_return"] = returns
+            group_returns.append(returns)
+            if max_steps is not None and max_steps > 0:
+                normalized_returns = 1 + returns / max_steps
+                self._log_min_mean_max(
+                    to_log,
+                    f"eval/{group}/reward/episode_reward_normalized",
+                    normalized_returns,
+                )
+                json_metrics[group + "_normalized_return"] = normalized_returns
+                normalized_group_returns.append(normalized_returns)
 
         mean_group_return = self._log_global_episode_reward(
-            list(json_metrics.values()), to_log, prefix="eval"
+            group_returns, to_log, prefix="eval"
         )
         # mean_group_return has shape (n_episodes) as we take the mean groups
         json_metrics["return"] = mean_group_return
+        if normalized_group_returns:
+            normalized_mean_group_return = torch.stack(
+                normalized_group_returns, dim=0
+            ).mean(0)
+            self._log_min_mean_max(
+                to_log,
+                "eval/reward/episode_reward_normalized",
+                normalized_mean_group_return,
+            )
+            json_metrics["normalized_return"] = normalized_mean_group_return
 
         to_log["eval/reward/episode_len_mean"] = sum(
             td.batch_size[0] for td in rollouts

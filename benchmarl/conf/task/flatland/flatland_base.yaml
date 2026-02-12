@@ -1,10 +1,10 @@
 defaults:
   - _self_
 
-map_width: 30
-map_height: 30
+map_width: 25
+map_height: 25
 num_agents: 2
-num_steps: 50
+num_steps: 1000
 reward_coefs:
   arrival_reward: 5
   delay_reward: 0.0
@@ -12,4 +12,4 @@ reward_coefs:
   departure_reward: 0
   deadlock_penalty: 2.5
   arrival_delay_penalty: 0
-smoke_obs_only: true
+env_pickle: null

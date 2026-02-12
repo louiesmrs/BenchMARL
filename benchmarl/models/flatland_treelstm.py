@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, MISSING
 from typing import Optional
+import math
 
 import torch
 from tensordict import TensorDictBase
@@ -9,6 +10,29 @@ from torch import nn
 
 from benchmarl.models.common import Model, ModelConfig
 from benchmarl.models.flatland_tree_modules import TreeLSTM, TreeTransformer
+
+
+class AgentAttentionBlock(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, ff_mult: int) -> None:
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
+        )
+        self.att_mlp = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.GELU(),
+        )
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * ff_mult),
+            nn.GELU(),
+            nn.Linear(embed_dim * ff_mult, embed_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        att_out, _ = self.attn(x, x, x)
+        x = self.att_mlp(torch.cat([x, att_out], dim=-1))
+        x = self.ff(x)
+        return x
 
 
 class FlatlandTreeBase(Model):
@@ -24,10 +48,9 @@ class FlatlandTreeBase(Model):
         transformer_heads: int,
         transformer_layers: int,
         transformer_ff_mult: int,
-        use_tree_transformer: bool,
+        tree_encoder_type: str,
         **kwargs,
     ):
-        super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.tree_embedding_size = tree_embedding_size
         self.num_nodes = num_nodes
@@ -38,7 +61,14 @@ class FlatlandTreeBase(Model):
         self.transformer_heads = transformer_heads
         self.transformer_layers = transformer_layers
         self.transformer_ff_mult = transformer_ff_mult
-        self.use_tree_transformer = use_tree_transformer
+        self.tree_encoder_type = tree_encoder_type
+
+        super().__init__(**kwargs)
+
+        if not self.input_has_agent_dim:
+            raise ValueError(
+                "Flatland tree models require per-agent observations."
+            )
 
         self.attr_embedding = nn.Sequential(
             nn.Linear(self.agent_attr_size, 2 * self.hidden_size),
@@ -51,141 +81,284 @@ class FlatlandTreeBase(Model):
             nn.GELU(),
         )
 
-        if self.use_tree_transformer:
+        if self.tree_encoder_type == "lstm":
+            self.tree_encoder = TreeLSTM(
+                self.node_attr_size,
+                self.tree_embedding_size,
+                max_iterations=self.num_nodes,
+            )
+        elif self.tree_encoder_type == "transformer":
             self.tree_encoder = TreeTransformer(
                 self.node_attr_size,
                 self.tree_embedding_size,
                 self.tree_embedding_size,
                 n_nodes=self.num_nodes,
+                num_heads=self.transformer_heads,
+                num_layers=max(1, self.transformer_layers),
+                ff_mult=self.transformer_ff_mult,
             )
         else:
-            self.tree_encoder = TreeLSTM(
-                self.node_attr_size,
-                self.tree_embedding_size,
-            )
+            raise ValueError(f"Unknown tree encoder type: {self.tree_encoder_type}")
 
         transformer_dim = self.hidden_size + self.tree_embedding_size
-        transformer_layers = []
-        for _ in range(self.transformer_layers):
-            transformer_layers.append(
-                nn.MultiheadAttention(
-                    embed_dim=transformer_dim,
-                    num_heads=self.transformer_heads,
-                    batch_first=True,
+        self.attention_layers = nn.ModuleList(
+            [
+                AgentAttentionBlock(
+                    transformer_dim, self.transformer_heads, self.transformer_ff_mult
                 )
-            )
-            transformer_layers.append(
-                nn.Sequential(
-                    nn.Linear(transformer_dim, transformer_dim * self.transformer_ff_mult),
-                    nn.GELU(),
-                    nn.Linear(transformer_dim * self.transformer_ff_mult, transformer_dim),
-                )
-            )
-        self.transformer_layers = nn.ModuleList(transformer_layers)
-        self.att_mlp = nn.Sequential(
-            nn.Linear(transformer_dim * 2, transformer_dim),
-            nn.GELU(),
+                for _ in range(self.transformer_layers)
+            ]
         )
+
+        self.to(self.device)
+
+    def _perform_checks(self):
+        super()._perform_checks()
+        if self.agent_group not in self.input_spec.keys():
+            raise ValueError(
+                f"Expected agent group '{self.agent_group}' in input spec, got {self.input_spec}"
+            )
+        obs_spec = self.input_spec[self.agent_group]
+        required_keys = {
+            "agents_attr",
+            "node_attr",
+            "adjacency",
+            "node_order",
+            "edge_order",
+            "valid_actions",
+        }
+        for key in required_keys:
+            if (self.agent_group, "observation", key) not in self.input_spec.keys(True, True):
+                raise ValueError(
+                    f"Missing observation key '{key}' in input spec {self.input_spec}"
+                )
+
+        agents_attr_spec = obs_spec["observation"]["agents_attr"]
+        node_attr_spec = obs_spec["observation"]["node_attr"]
+        adjacency_spec = obs_spec["observation"]["adjacency"]
+        node_order_spec = obs_spec["observation"]["node_order"]
+        edge_order_spec = obs_spec["observation"]["edge_order"]
+
+        if agents_attr_spec.shape[-1] != self.agent_attr_size:
+            raise ValueError(
+                f"agents_attr last dim {agents_attr_spec.shape[-1]} does not match agent_attr_size {self.agent_attr_size}"
+            )
+
+        if len(node_attr_spec.shape) == 2:
+            expected = self.num_nodes * self.node_attr_size
+            if node_attr_spec.shape[-1] != expected:
+                raise ValueError(
+                    f"node_attr flattened shape {node_attr_spec.shape} does not match expected {expected}"
+                )
+        else:
+            if node_attr_spec.shape[-2] != self.num_nodes or node_attr_spec.shape[-1] != self.node_attr_size:
+                raise ValueError(
+                    f"node_attr shape {node_attr_spec.shape} does not match num_nodes {self.num_nodes} and node_attr_size {self.node_attr_size}"
+                )
+
+        if len(adjacency_spec.shape) == 2:
+            expected = self.num_edges * 3
+            if adjacency_spec.shape[-1] != expected:
+                raise ValueError(
+                    f"adjacency flattened shape {adjacency_spec.shape} does not match expected {expected}"
+                )
+        else:
+            if adjacency_spec.shape[-2] != self.num_edges:
+                raise ValueError(
+                    f"adjacency edges {adjacency_spec.shape[-2]} does not match num_edges {self.num_edges}"
+                )
+            if adjacency_spec.shape[-1] < 3:
+                raise ValueError("adjacency must have three columns (parent, child, slot)")
+
+        if node_order_spec.shape[-1] != self.num_nodes:
+            raise ValueError(
+                f"node_order length {node_order_spec.shape[-1]} does not match num_nodes {self.num_nodes}"
+            )
+        if edge_order_spec.shape[-1] != self.num_edges:
+            raise ValueError(
+                f"edge_order length {edge_order_spec.shape[-1]} does not match num_edges {self.num_edges}"
+            )
 
     def _modify_adjacency(self, adjacency: torch.Tensor) -> torch.Tensor:
         adjacency = adjacency.clone()
-        batch_size, n_agents, num_edges, _ = adjacency.shape
+        batch_size, n_agents, num_edges, num_cols = adjacency.shape
         num_nodes = num_edges + 1
-        id_tree = torch.arange(0, batch_size * n_agents, device=adjacency.device)
-        id_nodes = id_tree.view(batch_size, n_agents, 1)
-        invalid_mask = adjacency == -2
 
-        adjacency = adjacency.clone()
-        adjacency[..., 0] += id_nodes * num_nodes
-        adjacency[..., 1] += id_nodes * num_nodes
-
-        fill_value = -batch_size * n_agents * num_nodes
-        adjacency = torch.where(invalid_mask, adjacency.new_full((), fill_value), adjacency)
-        adjacency = torch.where(adjacency < 0, adjacency.new_full((), -2), adjacency)
-        return adjacency
-
-    def _compute_embeddings(self, obs: TensorDictBase) -> torch.Tensor:
-        agents_attr = obs.get(("agents", "observation", "agents_attr"))
-        node_attr = obs.get(("agents", "observation", "node_attr"))
-        adjacency = obs.get(("agents", "observation", "adjacency"))
-        node_order = obs.get(("agents", "observation", "node_order"))
-        edge_order = obs.get(("agents", "observation", "edge_order"))
-
-        *batch_dims, n_agents, num_nodes, _ = node_attr.shape
-        flat_batch = int(torch.tensor(batch_dims).prod()) if batch_dims else 1
-
-        node_attr = node_attr.reshape(flat_batch, n_agents, num_nodes, -1)
-        adjacency = adjacency.reshape(
-            flat_batch, n_agents, adjacency.shape[-2], adjacency.shape[-1]
+        idx = adjacency[..., :2]
+        invalid = idx < 0
+        offset = (
+            torch.arange(batch_size * n_agents, device=adjacency.device)
+            .view(batch_size, n_agents, 1, 1)
+            .mul(num_nodes)
         )
-        node_order = node_order.reshape(flat_batch, n_agents, -1)
-        edge_order = edge_order.reshape(flat_batch, n_agents, -1)
-        agents_attr = agents_attr.reshape(flat_batch, n_agents, -1)
+        idx = idx + offset
+        idx = torch.where(invalid, idx.new_full((), -1), idx)
 
-        edge_count = edge_order.shape[-1]
-        if adjacency.shape[-2] != edge_count:
-            adjacency = adjacency[..., :edge_count, :]
-        if adjacency.shape[-1] > 2:
-            adjacency = adjacency[..., :2]
+        if num_cols > 2:
+            slot = adjacency[..., 2:3]
+            invalid_edge = invalid.any(-1, keepdim=True)
+            slot = torch.where(invalid_edge, slot.new_full((), -1), slot)
+            return torch.cat([idx, slot], dim=-1)
+        return idx
+
+    def _compute_embeddings(self, tensordict: TensorDictBase) -> tuple[torch.Tensor, torch.Tensor]:
+        obs_prefix = (self.agent_group, "observation")
+        agents_attr = tensordict.get((*obs_prefix, "agents_attr"))
+        node_attr = tensordict.get((*obs_prefix, "node_attr"))
+        adjacency = tensordict.get((*obs_prefix, "adjacency"))
+        node_order = tensordict.get((*obs_prefix, "node_order"))
+        edge_order = tensordict.get((*obs_prefix, "edge_order"))
+
+        batch_dims = agents_attr.shape[:-2]
+        flat_batch = int(math.prod(batch_dims)) if batch_dims else 1
+
+        agents_attr = agents_attr.reshape(flat_batch, self.n_agents, -1)
+
+        if node_attr.dim() == 3:
+            node_attr = node_attr.reshape(
+                flat_batch, self.n_agents, self.num_nodes, self.node_attr_size
+            )
+        else:
+            node_attr = node_attr.reshape(
+                flat_batch, self.n_agents, self.num_nodes, -1
+            )
+
+        if adjacency.dim() == 3:
+            adjacency = adjacency.reshape(
+                flat_batch, self.n_agents, self.num_edges, 3
+            )
+        else:
+            adjacency = adjacency.reshape(
+                flat_batch, self.n_agents, self.num_edges, -1
+            )
+
+        node_order = node_order.reshape(flat_batch, self.n_agents, self.num_nodes)
+        edge_order = edge_order.reshape(flat_batch, self.n_agents, self.num_edges)
 
         adjacency = self._modify_adjacency(adjacency)
-        if self.use_tree_transformer:
-            tree_embedding = self.tree_encoder(node_attr, adjacency)
+
+        if self.tree_encoder_type == "lstm":
+            tree_embedding = self.tree_encoder(
+                node_attr, adjacency, node_order, edge_order
+            )
+            tree_embedding = tree_embedding.reshape(
+                flat_batch, self.n_agents, self.num_nodes, -1
+            )[:, :, 0, :]
         else:
-            tree_embedding = self.tree_encoder(node_attr, adjacency, node_order, edge_order)
-            tree_embedding = tree_embedding.unflatten(0, (flat_batch, n_agents, num_nodes))
-            tree_embedding = tree_embedding[:, :, 0, :]
+            tree_embedding = self.tree_encoder(node_attr, adjacency, node_order)
 
         agent_attr_embedding = self.attr_embedding(agents_attr)
         embedding = torch.cat([agent_attr_embedding, tree_embedding], dim=-1)
 
         att_embedding = embedding
-        for i in range(0, len(self.transformer_layers), 2):
-            att_layer = self.transformer_layers[i]
-            ff_layer = self.transformer_layers[i + 1]
-            att_out, _ = att_layer(att_embedding, att_embedding, att_embedding)
-            att_embedding = self.att_mlp(torch.cat([att_embedding, att_out], dim=-1))
-            att_embedding = ff_layer(att_embedding)
+        for layer in self.attention_layers:
+            att_embedding = layer(att_embedding)
 
         if batch_dims:
-            embedding = embedding.reshape(*batch_dims, n_agents, -1)
-            att_embedding = att_embedding.reshape(*batch_dims, n_agents, -1)
+            embedding = embedding.reshape(*batch_dims, self.n_agents, -1)
+            att_embedding = att_embedding.reshape(*batch_dims, self.n_agents, -1)
 
         return embedding, att_embedding
 
 
-class FlatlandTreePolicy(FlatlandTreeBase):
+class FlatlandTreeLSTMPolicy(FlatlandTreeBase):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(tree_encoder_type="lstm", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
+        if output_dim != self.num_actions:
+            raise ValueError(
+                f"Policy output dim {output_dim} does not match num_actions {self.num_actions}"
+            )
         self.policy_head = nn.Sequential(
-            nn.Linear(self.hidden_size * 2 + self.tree_embedding_size * 2, 2 * self.hidden_size),
+            nn.Linear(
+                self.hidden_size * 2 + self.tree_embedding_size * 2,
+                2 * self.hidden_size,
+            ),
             nn.GELU(),
             nn.Linear(2 * self.hidden_size, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self._compute_embeddings(tensordict)
         logits = self.policy_head(torch.cat([embedding, att_embedding], dim=-1))
-        valid_actions = tensordict.get(("agents", "observation", "valid_actions"))
+        valid_actions = tensordict.get((self.agent_group, "observation", "valid_actions"))
         logits = logits.masked_fill(~valid_actions, float("-inf"))
         tensordict.set(self.out_key, logits)
         return tensordict
 
 
-class FlatlandTreeCritic(FlatlandTreeBase):
+class FlatlandTreeTransformerPolicy(FlatlandTreeBase):
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(tree_encoder_type="transformer", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
-        self.value_head = nn.Sequential(
-            nn.Linear(self.hidden_size * 2 + self.tree_embedding_size * 2, 2 * self.hidden_size),
+        if output_dim != self.num_actions:
+            raise ValueError(
+                f"Policy output dim {output_dim} does not match num_actions {self.num_actions}"
+            )
+        self.policy_head = nn.Sequential(
+            nn.Linear(
+                self.hidden_size * 2 + self.tree_embedding_size * 2,
+                2 * self.hidden_size,
+            ),
             nn.GELU(),
             nn.Linear(2 * self.hidden_size, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.to(self.device)
+
+    def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        embedding, att_embedding = self._compute_embeddings(tensordict)
+        logits = self.policy_head(torch.cat([embedding, att_embedding], dim=-1))
+        valid_actions = tensordict.get((self.agent_group, "observation", "valid_actions"))
+        logits = logits.masked_fill(~valid_actions, float("-inf"))
+        tensordict.set(self.out_key, logits)
+        return tensordict
+
+
+class FlatlandTreeLSTMCritic(FlatlandTreeBase):
+    def __init__(self, **kwargs):
+        super().__init__(tree_encoder_type="lstm", **kwargs)
+        output_dim = self.output_leaf_spec.shape[-1]
+        self.value_head = nn.Sequential(
+            nn.Linear(
+                self.hidden_size * 2 + self.tree_embedding_size * 2,
+                2 * self.hidden_size,
+            ),
+            nn.GELU(),
+            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, output_dim),
+        )
+        self.to(self.device)
+
+    def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        embedding, att_embedding = self._compute_embeddings(tensordict)
+        values = self.value_head(torch.cat([embedding, att_embedding], dim=-1))
+        if not self.output_has_agent_dim:
+            values = values.mean(-2)
+        tensordict.set(self.out_key, values)
+        return tensordict
+
+
+class FlatlandTreeTransformerCritic(FlatlandTreeBase):
+    def __init__(self, **kwargs):
+        super().__init__(tree_encoder_type="transformer", **kwargs)
+        output_dim = self.output_leaf_spec.shape[-1]
+        self.value_head = nn.Sequential(
+            nn.Linear(
+                self.hidden_size * 2 + self.tree_embedding_size * 2,
+                2 * self.hidden_size,
+            ),
+            nn.GELU(),
+            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, output_dim),
+        )
+        self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self._compute_embeddings(tensordict)
@@ -197,38 +370,72 @@ class FlatlandTreeCritic(FlatlandTreeBase):
 
 
 @dataclass
-class FlatlandTreePolicyConfig(ModelConfig):
-    hidden_size: int = 128
-    tree_embedding_size: int = 128
-    num_nodes: int = 31
-    num_edges: int = 30
-    agent_attr_size: int = 83
-    node_attr_size: int = 12
-    num_actions: int = 5
-    transformer_heads: int = 4
-    transformer_layers: int = 3
-    transformer_ff_mult: int = 2
-    use_tree_transformer: bool = False
+class FlatlandTreeLSTMPolicyConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
 
     @staticmethod
     def associated_class():
-        return FlatlandTreePolicy
+        return FlatlandTreeLSTMPolicy
 
 
 @dataclass
-class FlatlandTreeCriticConfig(ModelConfig):
-    hidden_size: int = 128
-    tree_embedding_size: int = 128
-    num_nodes: int = 31
-    num_edges: int = 30
-    agent_attr_size: int = 83
-    node_attr_size: int = 12
-    num_actions: int = 5
-    transformer_heads: int = 4
-    transformer_layers: int = 3
-    transformer_ff_mult: int = 2
-    use_tree_transformer: bool = False
+class FlatlandTreeTransformerPolicyConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
 
     @staticmethod
     def associated_class():
-        return FlatlandTreeCritic
+        return FlatlandTreeTransformerPolicy
+
+
+@dataclass
+class FlatlandTreeLSTMCriticConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
+
+    @staticmethod
+    def associated_class():
+        return FlatlandTreeLSTMCritic
+
+
+@dataclass
+class FlatlandTreeTransformerCriticConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
+
+    @staticmethod
+    def associated_class():
+        return FlatlandTreeTransformerCritic

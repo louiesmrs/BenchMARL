@@ -101,6 +101,7 @@ class Mappo(Algorithm):
         loss_module.make_value_estimator(
             ValueEstimators.GAE, gamma=self.experiment_config.gamma, lmbda=self.lmbda
         )
+        self._maybe_disable_vmap(loss_module)
         return loss_module, False
 
     def _get_parameters(self, group: str, loss: ClipPPOLoss) -> Dict[str, Iterable]:

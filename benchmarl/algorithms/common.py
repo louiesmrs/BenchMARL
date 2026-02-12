@@ -5,6 +5,7 @@
 #
 
 import pathlib
+import warnings
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -106,6 +107,19 @@ class Algorithm(ABC):
                     " to follow the library conventions, "
                     "you can apply a transform to your environment to satisfy this criteria."
                 )
+
+    def _maybe_disable_vmap(self, loss_module: LossModule) -> None:
+        if self.experiment_config.train_device != "mps":
+            return
+        critic_name = self.critic_model_config.__class__.__name__.lower()
+        if "flatlandtree" not in critic_name:
+            return
+        if hasattr(loss_module, "value_estimator"):
+            loss_module.value_estimator.deactivate_vmap = True
+            warnings.warn(
+                "Disabling vmap for value estimation on MPS for Flatland tree critics. "
+                "MPS does not fully support functorch vmap for this model."
+            )
 
     def get_loss_and_updater(self, group: str) -> Tuple[LossModule, TargetNetUpdater]:
         """

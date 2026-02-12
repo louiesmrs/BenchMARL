@@ -9,4 +9,3 @@ num_actions: 5
 transformer_heads: 4
 transformer_layers: 3
 transformer_ff_mult: 2
-use_tree_transformer: false

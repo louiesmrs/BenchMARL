@@ -11,7 +11,7 @@ requires-python = ">=3.10,<3.12"
 
 dependencies = [
   "flatland-rl==4.0.1",
-  "torchrl~=0.10",
+  "torchrl==0.10.0",
   "tqdm",
   "hydra-core",
   "torchvision",

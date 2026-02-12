@@ -4,8 +4,11 @@
 #  LICENSE file in the root directory of this source tree.
 #
 import importlib
-from dataclasses import is_dataclass
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
 
 from benchmarl.algorithms.common import AlgorithmConfig
 from benchmarl.environments import task_config_registry, TaskClass
@@ -145,7 +148,60 @@ def _find_hydra_folder(restore_file: str) -> str:
     raise _HydraMissingMetadataError()
 
 
-def reload_experiment_from_file(restore_file: str) -> Experiment:
+def _serialize_config(value: Any) -> Any:
+    if is_dataclass(value):
+        return _serialize_config(asdict(value))
+    if isinstance(value, dict):
+        return {key: _serialize_config(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_config(val) for val in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    return value
+
+
+def _print_experiment_config(experiment: Experiment) -> None:
+    task_name = f"{experiment.environment_name}/{experiment.task_name}"
+    print("\nReloaded experiment with:")
+    print(f"\nAlgorithm: {experiment.algorithm_name}, Task: {task_name}")
+    config_payload = {
+        "experiment": _serialize_config(experiment.config),
+        "algorithm": _serialize_config(experiment.algorithm_config),
+        "task": _serialize_config(experiment.task.config),
+        "model": _serialize_config(experiment.model_config),
+        "critic_model": _serialize_config(experiment.critic_model_config),
+        "seed": experiment.seed,
+    }
+    print("\nLoaded config:\n")
+    print(yaml.safe_dump(config_payload, sort_keys=False))
+
+
+def _parse_override_patches(extra_overrides: Optional[List[str]]):
+    if not extra_overrides:
+        return None, None
+    experiment_patch: Dict[str, Any] = {}
+    task_patch: Dict[str, Any] = {}
+    for override in extra_overrides:
+        override = override.lstrip("+")
+        if "=" not in override:
+            continue
+        key, value = override.split("=", 1)
+        try:
+            parsed_value = yaml.safe_load(value)
+        except yaml.YAMLError:
+            parsed_value = value
+        if key.startswith("experiment."):
+            experiment_patch[key.split(".", 1)[1]] = parsed_value
+        elif key.startswith("task."):
+            task_patch[key.split(".", 1)[1]] = parsed_value
+    return experiment_patch or None, task_patch or None
+
+
+def reload_experiment_from_file(
+    restore_file: str, extra_overrides: Optional[List[str]] = None
+) -> Experiment:
     """Reloads the experiment from a given restore file.
 
     Requires a ``.hydra`` folder containing ``config.yaml``, ``hydra.yaml``, and ``overrides.yaml``
@@ -153,25 +209,42 @@ def reload_experiment_from_file(restore_file: str) -> Experiment:
 
     Args:
         restore_file (str): The checkpoint file of the experiment reload.
+        extra_overrides (Optional[List[str]]): Optional hydra override strings.
 
     """
     try:
         hydra_folder = _find_hydra_folder(restore_file)
     except _HydraMissingMetadataError:
-        # Hydra was not used
-        return Experiment.reload_from_file(restore_file)
-
-    with initialize(
-        version_base=None,
-        config_path="conf",
-    ):
-        cfg = compose(
-            config_name="config",
-            overrides=OmegaConf.load(Path(hydra_folder) / "overrides.yaml"),
-            return_hydra_config=True,
+        experiment_patch, task_patch = _parse_override_patches(extra_overrides)
+        experiment = Experiment.reload_from_file(
+            restore_file, experiment_patch=experiment_patch, task_patch=task_patch
         )
-        task_name = cfg.hydra.runtime.choices.task
-        algorithm_name = cfg.hydra.runtime.choices.algorithm
+        _print_experiment_config(experiment)
+        return experiment
+
+    overrides = OmegaConf.load(Path(hydra_folder) / "overrides.yaml")
+    if extra_overrides:
+        overrides = list(overrides) + list(extra_overrides)
+
+    try:
+        with initialize(
+            version_base=None,
+            config_path="conf",
+        ):
+            cfg = compose(
+                config_name="config",
+                overrides=overrides,
+                return_hydra_config=True,
+            )
+            task_name = cfg.hydra.runtime.choices.task
+            algorithm_name = cfg.hydra.runtime.choices.algorithm
+    except Exception:
+        experiment_patch, task_patch = _parse_override_patches(extra_overrides)
+        experiment = Experiment.reload_from_file(
+            restore_file, experiment_patch=experiment_patch, task_patch=task_patch
+        )
+        _print_experiment_config(experiment)
+        return experiment
     with initialize_config_dir(version_base=None, config_dir=hydra_folder):
         cfg_loaded = dict(compose(config_name="config"))
 

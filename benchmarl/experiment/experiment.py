@@ -123,6 +123,9 @@ class ExperimentConfig:
     keep_checkpoints_num: Optional[int] = MISSING
     exclude_buffer_from_checkpoint: bool = MISSING
 
+    evaluation_only: bool = False
+    experiment_name: Optional[str] = None
+
     def train_batch_size(self, on_policy: bool) -> int:
         """
         The batch size of tensors used for training
@@ -545,6 +548,10 @@ class Experiment(CallbackNotifier):
             assert len(group_policy) == 1
             self.group_policies.update({group: group_policy[0]})
 
+        if self.config.evaluation_only:
+            self.collector = None
+            return
+
         if not self.config.collect_with_grad:
             self.collector = SyncDataCollector(
                 self.env_func,
@@ -594,9 +601,12 @@ class Experiment(CallbackNotifier):
                     save_folder = Path(os.getcwd())
 
         if self.config.restore_file is None:
-            self.name = generate_exp_name(
-                f"{self.algorithm_name}_{self.task_name}_{self.model_name}", ""
-            )
+            if self.config.experiment_name:
+                self.name = self.config.experiment_name
+            else:
+                self.name = generate_exp_name(
+                    f"{self.algorithm_name}_{self.task_name}_{self.model_name}", ""
+                )
             self.folder_name = save_folder / self.name
 
         else:
@@ -787,12 +797,20 @@ class Experiment(CallbackNotifier):
             # End of step
             iteration_time = time.time() - iteration_start
             self.total_time += iteration_time
+            collection_sps = (
+                current_frames / collection_time if collection_time > 0 else 0.0
+            )
+            iteration_sps = (
+                current_frames / iteration_time if iteration_time > 0 else 0.0
+            )
             self.logger.log(
                 {
                     "timers/collection_time": collection_time,
                     "timers/training_time": training_time,
                     "timers/iteration_time": iteration_time,
                     "timers/total_time": self.total_time,
+                    "timers/collection_sps": collection_sps,
+                    "timers/iteration_sps": iteration_sps,
                     "counters/current_frames": current_frames,
                     "counters/total_frames": self.total_frames,
                     "counters/iter": self.n_iters_performed,
@@ -815,9 +833,11 @@ class Experiment(CallbackNotifier):
     def close(self):
         """Close the experiment."""
         if not self.config.collect_with_grad:
-            self.collector.shutdown()
+            if self.collector is not None:
+                self.collector.shutdown()
         else:
-            self.rollout_env.close()
+            if hasattr(self, "rollout_env"):
+                self.rollout_env.close()
         self.test_env.close()
         self.logger.finish()
 
@@ -947,7 +967,16 @@ class Experiment(CallbackNotifier):
             video_frames=video_frames,
             step=self.n_iters_performed,
             total_frames=self.total_frames,
+            max_steps=self.max_steps,
         )
+        eval_info = self.task.log_info(rollouts[0]) if len(rollouts) else {}
+        if eval_info:
+            eval_info = {
+                key.replace("collection/", "eval/"): value
+                for key, value in eval_info.items()
+            }
+            self.logger.log(eval_info, step=self.n_iters_performed)
+            print(f"Evaluation info: {eval_info}")
         # Callback
         self._on_evaluation_end(rollouts)
 
@@ -970,7 +999,7 @@ class Experiment(CallbackNotifier):
                 for k, item in self.replay_buffers.items()
             },
         )
-        if not self.config.collect_with_grad:
+        if not self.config.collect_with_grad and self.collector is not None:
             state_dict.update({"collector": self.collector.state_dict()})
         self._on_state_dict(state_dict)
         return state_dict
@@ -988,7 +1017,7 @@ class Experiment(CallbackNotifier):
                 self.replay_buffers[group].load_state_dict(
                     state_dict[f"buffer_{group}"]
                 )
-        if not self.config.collect_with_grad:
+        if not self.config.collect_with_grad and self.collector is not None:
             self.collector.load_state_dict(state_dict["collector"])
         self.total_time = state_dict["state"]["total_time"]
         self.total_frames = state_dict["state"]["total_frames"]
@@ -1019,7 +1048,9 @@ class Experiment(CallbackNotifier):
 
     @staticmethod
     def reload_from_file(
-        restore_file: str, experiment_patch: Optional[Dict[str, Any]] = None
+        restore_file: str,
+        experiment_patch: Optional[Dict[str, Any]] = None,
+        task_patch: Optional[Dict[str, Any]] = None,
     ) -> Experiment:
         """
         Restores the experiment from the checkpoint file.
@@ -1031,6 +1062,7 @@ class Experiment(CallbackNotifier):
         Args:
             restore_file (str): The checkpoint file (.pt) of the experiment reload.
             experiment_patch (Optional[Dict[str, Any]]): The patch to apply to the experiment config.
+            task_patch (Optional[Dict[str, Any]]): The patch to apply to the task config.
 
         Returns:
             The reloaded experiment.
@@ -1049,6 +1081,10 @@ class Experiment(CallbackNotifier):
             experiment_config = pickle.load(f)
             critic_model_config = pickle.load(f)
             callbacks = pickle.load(f)
+        if task_patch is not None:
+            if not isinstance(task_config, dict):
+                raise ValueError("Task config must be a dict to apply patches")
+            task_config.update(task_patch)
         task.config = task_config
         experiment_config.restore_file = restore_file
         if experiment_patch is not None:
