@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+  - /algorithm: mappo
+  - /model: layers/flatland_tree_transformer
+  - /model@critic_model: layers/flatland_tree_transformer_critic
+  - _self_

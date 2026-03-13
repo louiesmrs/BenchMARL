@@ -6,6 +6,29 @@ import torch
 from torch import nn
 
 
+class AgentAttentionBlock(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, ff_mult: int) -> None:
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
+        )
+        self.att_mlp = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.GELU(),
+        )
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * ff_mult),
+            nn.GELU(),
+            nn.Linear(embed_dim * ff_mult, embed_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        att_out, _ = self.attn(x, x, x)
+        x = self.att_mlp(torch.cat([x, att_out], dim=-1))
+        x = self.ff(x)
+        return x
+
+
 class TreeLSTM(nn.Module):
     def __init__(
         self,
@@ -69,20 +92,36 @@ class TreeLSTM(nn.Module):
         safe_parent = parent_idx.clamp(0, total_nodes - 1)
         safe_child = child_idx.clamp(0, total_nodes - 1)
         flat_index = safe_parent * self.branching_factor + slot_idx
+
+        node_mask = node_order_flat.unsqueeze(1) == torch.arange(
+            self.max_iterations, device=device
+        )
+        edge_mask = edge_order_flat.unsqueeze(1) == torch.arange(
+            self.max_iterations, device=device
+        )
+
+        forest_iou = self.W_iou(forest_flat)
+        parent_feat = forest_flat[safe_parent]
+        parent_feat_proj = self.W_f(parent_feat)
+
+        flat_h = torch.zeros(
+            total_nodes * self.branching_factor,
+            self.out_features,
+            device=device,
+        )
+        flat_c = torch.zeros_like(flat_h)
+        flat_fc = torch.zeros_like(flat_h)
+
         for iteration in range(self.max_iterations):
-            node_mask = (node_order_flat == iteration).unsqueeze(-1)
-            edge_mask = edge_order_flat == iteration
-            edge_weight = (valid_edge & edge_mask).unsqueeze(-1).to(forest_flat.dtype)
+            node_mask_t = node_mask[:, iteration].unsqueeze(-1)
+            edge_mask_t = edge_mask[:, iteration]
+            edge_weight = (valid_edge & edge_mask_t).unsqueeze(-1).to(forest_flat.dtype)
 
             child_h = h[safe_child] * edge_weight
             child_c = c[safe_child] * edge_weight
 
-            flat_h = torch.zeros(
-                total_nodes * self.branching_factor,
-                self.out_features,
-                device=device,
-            )
-            flat_c = torch.zeros_like(flat_h)
+            flat_h.zero_()
+            flat_c.zero_()
             flat_h = flat_h.index_add(0, flat_index, child_h)
             flat_c = flat_c.index_add(0, flat_index, child_c)
 
@@ -93,18 +132,17 @@ class TreeLSTM(nn.Module):
                 total_nodes, self.branching_factor * self.out_features
             )
 
-            iou = self.W_iou(forest_flat) + self.U_iou(child_h_merge)
+            iou = forest_iou + self.U_iou(child_h_merge)
             i, o, u = torch.split(iou, iou.size(1) // 3, dim=1)
             i = torch.sigmoid(i)
             o = torch.sigmoid(o)
             u = torch.tanh(u)
 
-            parent_feat = forest_flat[safe_parent]
-            f = self.W_f(parent_feat) + self.U_f(child_h)
+            f = parent_feat_proj + self.U_f(child_h)
             f = torch.sigmoid(f) * edge_weight
             fc = f * child_c
 
-            flat_fc = torch.zeros_like(flat_h)
+            flat_fc.zero_()
             flat_fc = flat_fc.index_add(0, flat_index, fc)
             c_reduce = self.W_c(
                 flat_fc.view(total_nodes, self.branching_factor * self.out_features)
@@ -113,8 +151,8 @@ class TreeLSTM(nn.Module):
             new_c = i * u + c_reduce
             new_h = o * torch.tanh(new_c)
 
-            c = torch.where(node_mask, new_c, c)
-            h = torch.where(node_mask, new_h, h)
+            c = torch.where(node_mask_t, new_c, c)
+            h = torch.where(node_mask_t, new_h, h)
 
         return h
 
@@ -141,7 +179,10 @@ class TreeTransformer(nn.Module):
         self.ff_mult = ff_mult
         self.branching_factor = branching_factor
 
+        self.positional_dim = self.n_nodes * self.branching_factor
+
         self.input_linear = nn.Linear(self.in_features, self.hidden_features)
+        self.positional_proj = nn.Linear(self.positional_dim, self.hidden_features)
         self.output_linear = nn.Linear(
             self.hidden_features * self.n_nodes, self.out_features
         )
@@ -163,6 +204,7 @@ class TreeTransformer(nn.Module):
         forest: torch.Tensor,
         adjacency: torch.Tensor,
         node_order: torch.Tensor,
+        positional_encoding: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if adjacency.shape[-1] < 2:
             raise ValueError(
@@ -179,8 +221,18 @@ class TreeTransformer(nn.Module):
         node_order = node_order.reshape(flat_batch, n_nodes)
         adjacency = adjacency.reshape(flat_batch, adjacency.shape[-2], adjacency.shape[-1])
 
-        positional_encoding = self.get_positional_encoding(adjacency, node_order)
-        input_data = self.input_linear(forest) + positional_encoding
+        if positional_encoding is None:
+            positional_encoding = self.get_positional_encoding(adjacency, node_order)
+        else:
+            positional_encoding = positional_encoding.reshape(flat_batch, n_nodes, -1)
+
+        if positional_encoding.shape[-1] != self.positional_dim:
+            raise ValueError(
+                "TreeTransformer positional encoding dim "
+                f"{positional_encoding.shape[-1]} does not match expected {self.positional_dim}"
+            )
+
+        input_data = self.input_linear(forest) + self.positional_proj(positional_encoding)
         output = self.transformer_encoder(input_data)
         output = output.reshape(flat_batch, n_nodes * self.hidden_features)
         output = self.output_linear(output).reshape(batch_size, n_agents, -1)
@@ -195,15 +247,9 @@ class TreeTransformer(nn.Module):
         max_order = node_order.max(dim=1).values
         node_depth = (max_order.unsqueeze(1) - node_order).to(torch.long)
         max_depth = self.n_nodes - 1
-        required_dim = (max_depth + 1) * self.branching_factor
-        if required_dim > self.hidden_features:
-            raise ValueError(
-                "TreeTransformer positional encoding requires "
-                f"hidden_features >= {required_dim}, got {self.hidden_features}"
-            )
 
         pos_flat = torch.zeros(
-            tree_count * n_nodes, self.hidden_features, device=device
+            tree_count * n_nodes, self.positional_dim, device=device
         )
 
         edges = adjacency.reshape(-1, adjacency.shape[-1])
@@ -233,9 +279,6 @@ class TreeTransformer(nn.Module):
                 1, index.unsqueeze(1), 1.0
             )
             child_pos = (parent_pos + onehot) * edge_weight
+            pos_flat.index_add_(0, safe_child, child_pos)
 
-            updates = torch.zeros_like(pos_flat)
-            updates = updates.index_add(0, safe_child, child_pos)
-            pos_flat = pos_flat + updates
-
-        return pos_flat.view(tree_count, n_nodes, self.hidden_features)
+        return pos_flat.view(tree_count, n_nodes, self.positional_dim)

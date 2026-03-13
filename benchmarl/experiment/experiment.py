@@ -968,16 +968,9 @@ class Experiment(CallbackNotifier):
             video_frames=video_frames,
             step=self.n_iters_performed,
             total_frames=self.total_frames,
+            task=self.task,
             max_steps=self.max_steps,
         )
-        eval_info = self.task.log_info(rollouts[0]) if len(rollouts) else {}
-        if eval_info:
-            eval_info = {
-                key.replace("collection/", "eval/"): value
-                for key, value in eval_info.items()
-            }
-            self.logger.log(eval_info, step=self.n_iters_performed)
-            print(f"Evaluation info: {eval_info}")
         # Callback
         self._on_evaluation_end(rollouts)
 

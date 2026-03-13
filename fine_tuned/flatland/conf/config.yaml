@@ -1,0 +1,16 @@
+defaults:
+  - experiment: flatland_finetuned
+  - task: flatland/flatland
+  - preset: mappo_mlp
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://benchmarl/conf
+
+seed: 0
+
+algorithm:
+  clip_epsilon: 0.1
+  entropy_coef: 0.01
+  critic_coef: 0.01

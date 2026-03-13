@@ -18,6 +18,10 @@ from .gru import Gru, GruConfig
 from .lstm import Lstm, LstmConfig
 from .mlp import Mlp, MlpConfig
 from .flatland_treelstm import (
+    FlatlandTreeGNNPolicy,
+    FlatlandTreeGNNPolicyConfig,
+    FlatlandTreeGNNCritic,
+    FlatlandTreeGNNCriticConfig,
     FlatlandTreeLSTMPolicy,
     FlatlandTreeLSTMPolicyConfig,
     FlatlandTreeTransformerPolicy,
@@ -41,6 +45,10 @@ classes = [
     "GruConfig",
     "Lstm",
     "LstmConfig",
+    "FlatlandTreeGNNPolicy",
+    "FlatlandTreeGNNPolicyConfig",
+    "FlatlandTreeGNNCritic",
+    "FlatlandTreeGNNCriticConfig",
     "FlatlandTreeLSTMPolicy",
     "FlatlandTreeLSTMPolicyConfig",
     "FlatlandTreeTransformerPolicy",
@@ -58,6 +66,8 @@ model_config_registry = {
     "deepsets": DeepsetsConfig,
     "gru": GruConfig,
     "lstm": LstmConfig,
+    "flatland_treegnn": FlatlandTreeGNNPolicyConfig,
+    "flatland_treegnn_critic": FlatlandTreeGNNCriticConfig,
     "flatland_treelstm": FlatlandTreeLSTMPolicyConfig,
     "flatland_tree_transformer": FlatlandTreeTransformerPolicyConfig,
     "flatland_treelstm_critic": FlatlandTreeLSTMCriticConfig,

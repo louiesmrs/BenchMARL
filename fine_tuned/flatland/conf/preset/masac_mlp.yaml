@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+  - /algorithm: masac
+  - /model: layers/mlp
+  - /model@critic_model: layers/mlp
+  - _self_

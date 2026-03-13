@@ -178,6 +178,7 @@ class Logger:
         rollouts: List[TensorDictBase],
         total_frames: int,
         step: int,
+        task: Optional[Task] = None,
         video_frames: Optional[List] = None,
         max_steps: Optional[int] = None,
     ):
@@ -245,6 +246,25 @@ class Logger:
         to_log["eval/reward/episode_len_mean"] = sum(
             td.batch_size[0] for td in rollouts
         ) / len(rollouts)
+
+        if task is not None:
+            rollout_infos = [
+                {
+                    key.replace("collection/", "eval/"): value
+                    for key, value in task.log_info(td).items()
+                }
+                for td in rollouts
+            ]
+            for full_key in sorted({key for info in rollout_infos for key in info.keys()}):
+                values = torch.tensor(
+                    [float(info.get(full_key, float("nan"))) for info in rollout_infos],
+                    dtype=torch.float32,
+                )
+                valid_values = values[~torch.isnan(values)]
+                if valid_values.numel() == 0:
+                    continue
+                self._log_min_mean_max(to_log, full_key, valid_values)
+                json_metrics[full_key.split("/")[-1]] = values
 
         if self.json_writer is not None:
             self.json_writer.write(

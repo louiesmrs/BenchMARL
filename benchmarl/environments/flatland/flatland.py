@@ -6,6 +6,8 @@ from torchrl.data import Composite
 from torchrl.envs import EnvBase, RewardSum, Transform
 from torchrl.envs.transforms import FlattenObservation
 
+from benchmarl.environments.flatland.transforms import FlatlandTreePreprocessor
+
 from benchmarl.environments.common import Task, TaskClass
 
 
@@ -111,6 +113,7 @@ class FlatlandClass(TaskClass):
 
     def get_env_transforms(self, env: EnvBase) -> List[Transform]:
         return [
+            FlatlandTreePreprocessor(agent_group="agents"),
             FlattenObservation(
                 in_keys=[
                     ("agents", "observation", "adjacency"),
@@ -118,7 +121,7 @@ class FlatlandClass(TaskClass):
                 ],
                 first_dim=-2,
                 last_dim=-1,
-            )
+            ),
         ]
 
     def get_reward_sum_transform(self, env: EnvBase):

@@ -188,10 +188,12 @@ class Masac(Algorithm):
         actor_output_spec = Composite(
             {
                 group: Composite(
-                    {"logits": Unbounded(shape=logits_shape)},
+                    {"logits": Unbounded(shape=logits_shape, device=self.device)},
                     shape=(n_agents,),
+                    device=self.device,
                 )
-            }
+            },
+            device=self.device,
         )
         actor_module = model_config.get_model(
             input_spec=actor_input_spec,
@@ -304,7 +306,11 @@ class Masac(Algorithm):
         n_actions = self.action_spec[group, "action"].space.n
 
         critic_output_spec = Composite(
-            {"action_value": Unbounded(shape=(n_actions * n_agents,))},
+            {
+                "action_value": Unbounded(
+                    shape=(n_actions * n_agents,), device=self.device
+                )
+            },
             device=self.device,
         )
 
@@ -348,8 +354,13 @@ class Masac(Algorithm):
         critic_output_spec = Composite(
             {
                 group: Composite(
-                    {"action_value": Unbounded(shape=(n_agents, n_actions))},
+                    {
+                        "action_value": Unbounded(
+                            shape=(n_agents, n_actions), device=self.device
+                        )
+                    },
                     shape=(n_agents,),
+                    device=self.device,
                 )
             },
             device=self.device,
@@ -368,10 +379,12 @@ class Masac(Algorithm):
                 group: Composite(
                     {
                         "others_action": Unbounded(
-                            shape=(n_agents, n_actions * (n_agents - 1))
+                            shape=(n_agents, n_actions * (n_agents - 1)),
+                            device=self.device,
                         )
                     },
                     shape=(n_agents,),
+                    device=self.device,
                 ),
             },
             device=self.device,
@@ -474,16 +487,23 @@ class Masac(Algorithm):
 
         if self.share_param_critic:
             critic_output_spec = Composite(
-                {"state_action_value": Unbounded(shape=(1,))}
+                {"state_action_value": Unbounded(shape=(1,), device=self.device)},
+                device=self.device,
             )
         else:
             critic_output_spec = Composite(
                 {
                     group: Composite(
-                        {"state_action_value": Unbounded(shape=(n_agents, 1))},
+                        {
+                            "state_action_value": Unbounded(
+                                shape=(n_agents, 1), device=self.device
+                            )
+                        },
                         shape=(n_agents,),
+                        device=self.device,
                     )
-                }
+                },
+                device=self.device,
             )
 
         if self.state_spec is not None:
@@ -499,7 +519,8 @@ class Masac(Algorithm):
             critic_input_spec = self.state_spec.clone().update(
                 {
                     "global_action": Unbounded(
-                        shape=(self.action_spec[group, "action"].shape[-1] * n_agents,)
+                        shape=(self.action_spec[group, "action"].shape[-1] * n_agents,),
+                        device=self.device,
                     )
                 }
             )

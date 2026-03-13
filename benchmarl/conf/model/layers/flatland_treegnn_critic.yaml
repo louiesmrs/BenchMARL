@@ -1,0 +1,17 @@
+name: flatland_treegnn_critic
+hidden_size: 128
+tree_embedding_size: 128
+num_nodes: 31
+num_edges: 30
+agent_attr_size: 83
+node_attr_size: 12
+num_actions: 5
+transformer_heads: 4
+transformer_layers: 3
+transformer_ff_mult: 2
+gnn_heads: 4
+gnn_layers: 3
+gnn_dropout: 0.0
+gnn_self_loops: true
+gnn_add_reverse_edges: true
+gnn_use_edge_attr: true

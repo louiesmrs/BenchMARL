@@ -96,6 +96,9 @@ def load_and_merge_json_dicts(
     return full_dict
 
 
+FLATLAND_INFO_METRICS = ["arrival_ratio", "deadlock_ratio"]
+
+
 class Plotting:
     """Class containing static utilities for plotting in ``marl-eval``.
 
@@ -127,6 +130,11 @@ class Plotting:
 
     METRICS_TO_NORMALIZE = ["return"]
     METRIC_TO_PLOT = "return"
+    FLATLAND_INFO_METRICS = FLATLAND_INFO_METRICS
+
+    @staticmethod
+    def metrics_to_normalize_for(metric_name: str) -> List[str]:
+        return ["return"] if metric_name == "return" else []
 
     @staticmethod
     def process_data(

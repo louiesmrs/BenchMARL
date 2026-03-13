@@ -249,8 +249,10 @@ def reload_experiment_from_file(
         cfg_loaded = dict(compose(config_name="config"))
 
     for key in ("experiment", "algorithm", "task", "model", "critic_model"):
-        cfg[key].update(cfg_loaded[key])
-        cfg_loaded.pop(key)
+        base = cfg_loaded.get(key, {})
+        base.update(cfg[key])
+        cfg[key] = base
+        cfg_loaded.pop(key, None)
 
     cfg.update(cfg_loaded)
     del cfg.hydra
