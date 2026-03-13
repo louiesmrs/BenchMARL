@@ -18,6 +18,9 @@ dependencies = [
   "av<14",
   "numpy",
   "flatland_cutils @ git+https://github.com/louiesmrs/flatland_cutils.git@refs/heads/main",
+  "setuptools>=69.0.0,<70",
+  "torch-geometric>=2.7.0",
+  "tensorboard>=2.20.0",
 ]
 
 [tool.setuptools]

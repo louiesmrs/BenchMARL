@@ -171,28 +171,28 @@ def _build_experiment_config(model_name: str) -> ExperimentConfig:
     # We match the referenced schedule by using the same initial epsilon and
     # setting the final epsilon to the reference exponential schedule value
     # at x = max_n_frames.
-    config.exploration_eps_init = 1.0
-    config.exploration_eps_end = _final_eps_from_reference_decay(max_n_frames)
-    config.exploration_anneal_frames = max_n_frames
+    config.exploration_eps_init = 0.8
+    config.exploration_eps_end = 0.01
+    config.exploration_anneal_frames = 1_000_000
 
     # PPO-style settings kept intentionally small for the short benchmark.
-    config.on_policy_collected_frames_per_batch = 1_000
-    config.on_policy_n_envs_per_worker = 2
-    config.on_policy_n_minibatch_iters = 4
-    config.on_policy_minibatch_size = 250
+    config.on_policy_collected_frames_per_batch = 6_000
+    config.on_policy_n_envs_per_worker = 10
+    config.on_policy_n_minibatch_iters = 45
+    config.on_policy_minibatch_size = 400
 
     # Match the requested off-policy setup.
-    config.off_policy_collected_frames_per_batch = 8
-    config.off_policy_n_envs_per_worker = 1
-    config.off_policy_n_optimizer_steps = 1
-    config.off_policy_train_batch_size = 128
+    config.off_policy_collected_frames_per_batch = 6000
+    config.off_policy_n_envs_per_worker = 10
+    config.off_policy_n_optimizer_steps = 100
+    config.off_policy_train_batch_size = 100
     config.off_policy_memory_size = 1_000_000
-    config.off_policy_init_random_frames = 128
+    config.off_policy_init_random_frames = 100
 
     config.evaluation = True
     config.render = False
-    config.evaluation_interval = 100_000
-    config.evaluation_episodes = 20
+    config.evaluation_interval = 120_000
+    config.evaluation_episodes = 200
     config.evaluation_deterministic_actions = True
     config.evaluation_static = False
 
@@ -257,7 +257,6 @@ def _build_tree_task():
     return task
 
 
-
 def _build_mlp_task():
     task = _build_tree_task()
 
@@ -275,9 +274,15 @@ def _build_mlp_task():
 
     def observation_spec(self, env: EnvBase) -> Composite:
         observation_spec = env.observation_spec.clone()
-        if AGENT_GROUP in observation_spec.keys() and "action_mask" in observation_spec[AGENT_GROUP].keys():
+        if (
+            AGENT_GROUP in observation_spec.keys()
+            and "action_mask" in observation_spec[AGENT_GROUP].keys()
+        ):
             del observation_spec[(AGENT_GROUP, "action_mask")]
-        if AGENT_GROUP in observation_spec.keys() and "observation" in observation_spec[AGENT_GROUP].keys():
+        if (
+            AGENT_GROUP in observation_spec.keys()
+            and "observation" in observation_spec[AGENT_GROUP].keys()
+        ):
             group_observation_spec = observation_spec[AGENT_GROUP]["observation"]
             for key in list(group_observation_spec.keys()):
                 if key != "flat_observation":
@@ -305,7 +310,6 @@ def _build_mlp_task():
     task.state_spec = MethodType(state_spec, task)
     task.action_mask_spec = MethodType(action_mask_spec, task)
     return task
-
 
 
 def _build_task(model_name: str):
@@ -346,7 +350,6 @@ def _build_model_configs(model_name: str):
             ),
         )
     raise ValueError(f"Unknown model: {model_name}")
-
 
 
 def main() -> None:
