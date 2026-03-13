@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
+import json
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 import matplotlib
 
@@ -14,12 +16,6 @@ from matplotlib import pyplot as plt
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BENCHMARL_ROOT))
-
-if importlib.util.find_spec("marl_eval") is None:
-    raise ImportError(
-        "marl_eval is not installed. Run this script with:\n"
-        "  uv run --with id-marl-eval python benchmarl_ext/fine_tuned/flatland/flatland_eval_plots.py"
-    )
 
 from benchmarl.eval_results import Plotting, load_and_merge_json_dicts
 
@@ -38,8 +34,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("benchmarl_ext/fine_tuned/flatland/short_benchmark_runs"),
-        help="Directory containing BenchMARL run folders with marl-eval JSON outputs.",
+        default=None,
+        help="Benchmark batch folder to plot. Defaults to the latest run folder under short_benchmark_runs.",
     )
     parser.add_argument(
         "--output-dir",
@@ -65,18 +61,102 @@ def _parse_args() -> argparse.Namespace:
         default=list(DEFAULT_METRICS),
         help="Metrics to plot. Defaults to return arrival_ratio deadlock_ratio.",
     )
+    parser.add_argument(
+        "--include-incomplete",
+        action="store_true",
+        help="Include incomplete runs instead of excluding them by default.",
+    )
     return parser.parse_args()
 
 
-def _find_json_files(input_dir: Path, output_dir: Path) -> List[str]:
+def _find_run_dirs(root_dir: Path) -> List[Path]:
+    return sorted(
+        [path for path in root_dir.iterdir() if path.is_dir() and (path / "manifest.yaml").exists()],
+        key=lambda path: path.name,
+    )
+
+
+
+def _resolve_input_dir(input_dir: Path | None) -> Path:
+    if input_dir is not None:
+        resolved = input_dir.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Input directory does not exist: {resolved}")
+        if (resolved / "manifest.yaml").exists():
+            return resolved
+        run_dirs = _find_run_dirs(resolved)
+        if run_dirs:
+            latest = run_dirs[-1]
+            print(f"Using latest benchmark run folder inside {resolved}: {latest}")
+            return latest
+        return resolved
+
+    root_dir = Path("benchmarl_ext/fine_tuned/flatland/short_benchmark_runs").resolve()
+    run_dirs = _find_run_dirs(root_dir)
+    if not run_dirs:
+        raise FileNotFoundError(f"No benchmark run folders with manifest.yaml found under {root_dir}")
+    latest = run_dirs[-1]
+    print(f"Using latest benchmark run folder: {latest}")
+    return latest
+
+
+
+def _find_json_files(input_dir: Path, output_dir: Path) -> List[Path]:
     json_files = []
     for path in sorted(input_dir.rglob("*.json")):
         if output_dir in path.parents:
             continue
         if "wandb" in path.parts:
             continue
-        json_files.append(str(path))
+        if path.name == "merged.json":
+            continue
+        json_files.append(path)
     return json_files
+
+
+
+def _extract_step_keys(run_data: Dict) -> Tuple[str, ...]:
+    return tuple(sorted(key for key in run_data.keys() if key.startswith("step_")))
+
+
+
+def _get_single_run_payload(data: Dict) -> Tuple[str, Tuple[str, ...]]:
+    env = next(iter(data))
+    task = next(iter(data[env]))
+    algo = next(iter(data[env][task]))
+    seed = next(iter(data[env][task][algo]))
+    run_data = data[env][task][algo][seed]
+    run_id = f"{algo}/{seed}"
+    return run_id, _extract_step_keys(run_data)
+
+
+
+def _filter_incomplete_json_files(json_files: List[Path]) -> List[str]:
+    if not json_files:
+        return []
+
+    step_sets: Dict[Path, Tuple[str, ...]] = {}
+    for path in json_files:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _, step_keys = _get_single_run_payload(data)
+        step_sets[path] = step_keys
+
+    reference_steps = max(step_sets.values(), key=lambda steps: (len(steps), steps))
+    filtered = []
+    excluded = []
+    for path, step_keys in step_sets.items():
+        if step_keys == reference_steps:
+            filtered.append(str(path))
+        else:
+            excluded.append((path, len(step_keys), len(reference_steps)))
+
+    if excluded:
+        print("Excluding incomplete runs:")
+        for path, observed, expected in excluded:
+            print(f"  - {path} (steps={observed}, expected={expected})")
+
+    return filtered
 
 
 def _discover_step_metrics(node: Dict) -> Set[str]:
@@ -104,8 +184,9 @@ def _plot_metric(
     output_dir: Path,
 ) -> None:
     metrics_to_normalize = Plotting.metrics_to_normalize_for(metric_name)
+    metric_processed_data = copy.deepcopy(processed_data)
     env_matrix, sample_matrix = Plotting.create_matrices(
-        processed_data,
+        metric_processed_data,
         env_name=env_name,
         metrics_to_normalize=metrics_to_normalize,
     )
@@ -122,7 +203,7 @@ def _plot_metric(
 
     plt.close("all")
     Plotting.task_sample_efficiency_curves(
-        processed_data,
+        metric_processed_data,
         env=env_name,
         task=task_name,
         metric_name=metric_name,
@@ -155,7 +236,13 @@ def _plot_metric(
 
 def main() -> None:
     args = _parse_args()
-    input_dir = args.input_dir.resolve()
+    if importlib.util.find_spec("marl_eval") is None:
+        raise ImportError(
+            "marl_eval is not installed. Run this script with:\n"
+            "  uv run --with id-marl-eval python benchmarl_ext/fine_tuned/flatland/flatland_eval_plots.py"
+        )
+
+    input_dir = _resolve_input_dir(args.input_dir)
     output_dir = (
         args.output_dir.resolve()
         if args.output_dir is not None
@@ -163,9 +250,19 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    json_files = _find_json_files(input_dir, output_dir)
-    if not json_files:
+    discovered_json_files = _find_json_files(input_dir, output_dir)
+    if not discovered_json_files:
         raise FileNotFoundError(f"No marl-eval JSON files found under {input_dir}")
+
+    json_files = (
+        [str(path) for path in discovered_json_files]
+        if args.include_incomplete
+        else _filter_incomplete_json_files(discovered_json_files)
+    )
+    if not json_files:
+        raise FileNotFoundError(
+            f"No complete marl-eval JSON files remained after filtering under {input_dir}"
+        )
 
     merged_json = output_dir / "merged.json"
     raw_data = load_and_merge_json_dicts(json_files, json_output_file=str(merged_json))

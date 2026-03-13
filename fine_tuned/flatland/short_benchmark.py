@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from math import prod
 from pathlib import Path
 from types import MethodType
@@ -128,6 +129,11 @@ def _parse_args() -> argparse.Namespace:
         choices=["mlp", "treelstm", "treeltsm", "treetransformer", "treegnn"],
         help="Model family to benchmark. Defaults to mlp.",
     )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Optional label for this benchmark batch. A timestamped run folder will be created.",
+    )
     return parser.parse_args()
 
 
@@ -149,7 +155,47 @@ def _final_eps_from_reference_decay(total_steps: int) -> float:
     return 1.0 / (1.000005**total_steps)
 
 
-def _build_experiment_config(model_name: str) -> ExperimentConfig:
+def _make_run_folder(model_name: str, run_name: str | None) -> Path:
+    root = Path(__file__).resolve().parent / "short_benchmark_runs"
+    root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    slug = run_name.strip().replace(" ", "_") if run_name else model_name
+    run_dir = root / f"{timestamp}__{slug}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def _write_manifest(
+    run_dir: Path,
+    *,
+    model_name: str,
+    run_name: str | None,
+    task: Any,
+    experiment_config: ExperimentConfig,
+    algorithm_configs: Sequence[Any],
+    model_config: Any,
+    critic_model_config: Any,
+    seed: int,
+) -> None:
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "run_name": run_name,
+        "model_name": model_name,
+        "save_folder": str(run_dir),
+        "algorithms": [type(config).__name__.replace("Config", "").lower() for config in algorithm_configs],
+        "seed": seed,
+        "task": _serialize_config(task.config),
+        "experiment": _serialize_config(experiment_config),
+        "model": _serialize_config(model_config),
+        "critic_model": _serialize_config(critic_model_config),
+        "expected_evaluation_step_count": 1 + experiment_config.max_n_frames // experiment_config.evaluation_interval,
+    }
+    with open(run_dir / "manifest.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(manifest, f, sort_keys=False)
+
+
+
+def _build_experiment_config(model_name: str, save_folder: Path) -> ExperimentConfig:
     config = ExperimentConfig.get_from_yaml()
     train_device = _resolve_train_device()
     max_n_frames = 3_000_000
@@ -206,8 +252,6 @@ def _build_experiment_config(model_name: str) -> ExperimentConfig:
     if model_name != "mlp":
         config.disable_value_estimator_vmap = True
 
-    save_folder = Path(__file__).resolve().parent / "short_benchmark_runs"
-    save_folder.mkdir(parents=True, exist_ok=True)
     config.save_folder = str(save_folder)
     return config
 
@@ -355,9 +399,11 @@ def _build_model_configs(model_name: str):
 def main() -> None:
     args = _parse_args()
     model_name = _normalize_model_name(args.model)
+    run_dir = _make_run_folder(model_name=model_name, run_name=args.run_name)
 
-    experiment_config = _build_experiment_config(model_name)
     task = _build_task(model_name)
+    model_config, critic_model_config = _build_model_configs(model_name)
+    experiment_config = _build_experiment_config(model_name, save_folder=run_dir)
 
     algorithm_configs = [
         IppoConfig.get_from_yaml(),
@@ -367,7 +413,18 @@ def main() -> None:
         VdnConfig.get_from_yaml(),
     ]
 
-    model_config, critic_model_config = _build_model_configs(model_name)
+    _write_manifest(
+        run_dir,
+        model_name=model_name,
+        run_name=args.run_name,
+        task=task,
+        experiment_config=experiment_config,
+        algorithm_configs=algorithm_configs,
+        model_config=model_config,
+        critic_model_config=critic_model_config,
+        seed=0,
+    )
+    print(f"\nBenchmark run folder: {run_dir}\n")
 
     for algorithm_config in algorithm_configs:
         _print_hydra_config(
