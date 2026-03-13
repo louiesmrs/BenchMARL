@@ -182,17 +182,20 @@ def _write_manifest(
         "run_name": run_name,
         "model_name": model_name,
         "save_folder": str(run_dir),
-        "algorithms": [type(config).__name__.replace("Config", "").lower() for config in algorithm_configs],
+        "algorithms": [
+            type(config).__name__.replace("Config", "").lower()
+            for config in algorithm_configs
+        ],
         "seed": seed,
         "task": _serialize_config(task.config),
         "experiment": _serialize_config(experiment_config),
         "model": _serialize_config(model_config),
         "critic_model": _serialize_config(critic_model_config),
-        "expected_evaluation_step_count": 1 + experiment_config.max_n_frames // experiment_config.evaluation_interval,
+        "expected_evaluation_step_count": 1
+        + experiment_config.max_n_frames // experiment_config.evaluation_interval,
     }
     with open(run_dir / "manifest.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(manifest, f, sort_keys=False)
-
 
 
 def _build_experiment_config(model_name: str, save_folder: Path) -> ExperimentConfig:
@@ -412,6 +415,10 @@ def main() -> None:
         IqlConfig.get_from_yaml(),
         VdnConfig.get_from_yaml(),
     ]
+
+    for algorithm_config in algorithm_configs:
+        if hasattr(algorithm_config, "minibatch_advantage"):
+            algorithm_config.minibatch_advantage = True
 
     _write_manifest(
         run_dir,
