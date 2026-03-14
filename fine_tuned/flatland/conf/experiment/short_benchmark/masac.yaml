@@ -4,7 +4,7 @@ off_policy_collected_frames_per_batch: 600
 off_policy_n_envs_per_worker: 6
 off_policy_n_optimizer_steps: 100
 off_policy_train_batch_size: 64
-off_policy_memory_size: 100_000
+off_policy_memory_size: 60_000
 off_policy_init_random_frames: 0
 
 evaluation_interval: 120_000

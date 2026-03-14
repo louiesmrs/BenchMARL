@@ -104,14 +104,6 @@ class TreeLSTM(nn.Module):
         parent_feat = forest_flat[safe_parent]
         parent_feat_proj = self.W_f(parent_feat)
 
-        flat_h = torch.zeros(
-            total_nodes * self.branching_factor,
-            self.out_features,
-            device=device,
-        )
-        flat_c = torch.zeros_like(flat_h)
-        flat_fc = torch.zeros_like(flat_h)
-
         for iteration in range(self.max_iterations):
             node_mask_t = node_mask[:, iteration].unsqueeze(-1)
             edge_mask_t = edge_mask[:, iteration]
@@ -120,10 +112,18 @@ class TreeLSTM(nn.Module):
             child_h = h[safe_child] * edge_weight
             child_c = c[safe_child] * edge_weight
 
-            flat_h.zero_()
-            flat_c.zero_()
-            flat_h = flat_h.index_add(0, flat_index, child_h)
-            flat_c = flat_c.index_add(0, flat_index, child_c)
+            flat_h = torch.zeros(
+                total_nodes * self.branching_factor,
+                self.out_features,
+                device=device,
+                dtype=forest_flat.dtype,
+            ).index_add(0, flat_index, child_h)
+            flat_c = torch.zeros(
+                total_nodes * self.branching_factor,
+                self.out_features,
+                device=device,
+                dtype=forest_flat.dtype,
+            ).index_add(0, flat_index, child_c)
 
             child_h_merge = flat_h.view(
                 total_nodes, self.branching_factor * self.out_features
@@ -142,8 +142,12 @@ class TreeLSTM(nn.Module):
             f = torch.sigmoid(f) * edge_weight
             fc = f * child_c
 
-            flat_fc.zero_()
-            flat_fc = flat_fc.index_add(0, flat_index, fc)
+            flat_fc = torch.zeros(
+                total_nodes * self.branching_factor,
+                self.out_features,
+                device=device,
+                dtype=forest_flat.dtype,
+            ).index_add(0, flat_index, fc)
             c_reduce = self.W_c(
                 flat_fc.view(total_nodes, self.branching_factor * self.out_features)
             )

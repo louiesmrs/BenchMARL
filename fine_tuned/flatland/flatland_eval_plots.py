@@ -17,7 +17,20 @@ from matplotlib import pyplot as plt
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BENCHMARL_ROOT))
 
-from benchmarl.eval_results import Plotting, load_and_merge_json_dicts
+
+def _load_eval_results_symbols():
+    eval_results_path = BENCHMARL_ROOT / "benchmarl" / "eval_results.py"
+    spec = importlib.util.spec_from_file_location(
+        "benchmarl_eval_results_standalone", eval_results_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load eval_results module from {eval_results_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.Plotting, module.load_and_merge_json_dicts
+
+
+Plotting, load_and_merge_json_dicts = _load_eval_results_symbols()
 
 DEFAULT_METRICS = ("return", "arrival_ratio", "deadlock_ratio")
 HIGHER_IS_BETTER = {
@@ -239,7 +252,8 @@ def main() -> None:
     if importlib.util.find_spec("marl_eval") is None:
         raise ImportError(
             "marl_eval is not installed. Run this script with:\n"
-            "  uv run --with id-marl-eval python benchmarl_ext/fine_tuned/flatland/flatland_eval_plots.py"
+            "  uv run --with id-marl-eval --with 'numpy<2' "
+            "python fine_tuned/flatland/flatland_eval_plots.py"
         )
 
     input_dir = _resolve_input_dir(args.input_dir)

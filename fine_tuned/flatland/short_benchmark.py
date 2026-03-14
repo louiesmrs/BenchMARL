@@ -456,8 +456,8 @@ def main() -> None:
     model_config, critic_model_config = _build_model_configs(model_name)
 
     algorithm_configs = [
-        #  IppoConfig.get_from_yaml(),
-        # MappoConfig.get_from_yaml(),
+        IppoConfig.get_from_yaml(),
+        MappoConfig.get_from_yaml(),
         MasacConfig.get_from_yaml(),
         IqlConfig.get_from_yaml(),
         VdnConfig.get_from_yaml(),
