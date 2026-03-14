@@ -216,9 +216,18 @@ def _write_manifest(
         "run_name": run_name,
         "model_name": model_name,
         "save_folder": str(run_dir),
+<<<<<<< HEAD
         "algorithms": [
             _algorithm_name_from_config(config) for config in algorithm_configs
         ],
+||||||| parent of 5987e0d (changes for new plots)
+        "algorithms": [type(config).__name__.replace("Config", "").lower() for config in algorithm_configs],
+=======
+        "algorithms": [
+            type(config).__name__.replace("Config", "").lower()
+            for config in algorithm_configs
+        ],
+>>>>>>> 5987e0d (changes for new plots)
         "seed": seed,
         "task": _serialize_config(task.config),
         "experiment_config_dir": str(SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR),
@@ -228,11 +237,19 @@ def _write_manifest(
         },
         "model": _serialize_config(model_config),
         "critic_model": _serialize_config(critic_model_config),
+<<<<<<< HEAD
+||||||| parent of 5987e0d (changes for new plots)
+        "expected_evaluation_step_count": 1 + experiment_config.max_n_frames // experiment_config.evaluation_interval,
+=======
+        "expected_evaluation_step_count": 1
+        + experiment_config.max_n_frames // experiment_config.evaluation_interval,
+>>>>>>> 5987e0d (changes for new plots)
     }
     with open(run_dir / "manifest.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(manifest, f, sort_keys=False)
 
 
+<<<<<<< HEAD
 def _load_yaml_dict(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -256,6 +273,12 @@ def _build_experiment_config(
     run_dir: Path,
     algorithm_name: str,
 ) -> ExperimentConfig:
+||||||| parent of 5987e0d (changes for new plots)
+
+def _build_experiment_config(model_name: str, save_folder: Path) -> ExperimentConfig:
+=======
+def _build_experiment_config(model_name: str, save_folder: Path) -> ExperimentConfig:
+>>>>>>> 5987e0d (changes for new plots)
     config = ExperimentConfig.get_from_yaml()
     train_device = _resolve_train_device()
 
