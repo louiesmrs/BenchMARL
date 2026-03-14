@@ -1,0 +1,42 @@
+sampling_device: "cpu"
+train_device: "auto"
+buffer_device: "train_device"
+
+share_policy_params: true
+prefer_continuous_actions: false
+
+gamma: 0.99
+lr: 5.0e-05
+
+max_n_frames: 3_000_000
+max_n_iters: null
+
+exploration_eps_init: 0.8
+exploration_eps_end: 0.01
+exploration_anneal_frames: 1_000_000
+
+on_policy_collected_frames_per_batch: 6_000
+on_policy_n_envs_per_worker: 10
+on_policy_n_minibatch_iters: 45
+on_policy_minibatch_size: 400
+
+off_policy_collected_frames_per_batch: 6_000
+off_policy_n_envs_per_worker: 10
+off_policy_n_optimizer_steps: 100
+off_policy_train_batch_size: 100
+off_policy_memory_size: 1_000_000
+off_policy_init_random_frames: 0
+
+evaluation: true
+render: false
+evaluation_interval: 120_000
+evaluation_episodes: 200
+evaluation_deterministic_actions: true
+evaluation_static: false
+
+loggers: [tensorboard, csv]
+create_json: true
+
+checkpoint_interval: 0
+checkpoint_at_end: true
+keep_checkpoints_num: 1

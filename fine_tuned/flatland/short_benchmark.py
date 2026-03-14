@@ -19,6 +19,9 @@ from torchrl.envs import EnvBase
 from torchrl.envs.transforms import ExcludeTransform, Transform
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
+SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR = (
+    Path(__file__).resolve().parent / "conf" / "experiment" / "short_benchmark"
+)
 sys.path.insert(0, str(BENCHMARL_ROOT))
 
 from benchmarl.algorithms import (
@@ -58,6 +61,41 @@ EXCLUDED_OBS_KEYS: tuple[str, ...] = (
     "adjacency_offset",
     "positional_encoding",
 )
+
+
+class FlatlandTreeActionMaskTransform(Transform):
+    def __init__(self, agent_group: str = AGENT_GROUP) -> None:
+        super().__init__()
+        self.agent_group = agent_group
+
+    def _reset(
+        self, tensordict: TensorDictBase, tensordict_reset: TensorDictBase
+    ) -> TensorDictBase:
+        return self._call(tensordict_reset)
+
+    def _call(self, tensordict: TensorDictBase) -> TensorDictBase:
+        valid_actions = tensordict.get(
+            (self.agent_group, "observation", "valid_actions")
+        ).to(torch.bool)
+        tensordict.set((self.agent_group, "action_mask"), valid_actions)
+        return tensordict
+
+    def transform_observation_spec(self, observation_spec):
+        if not isinstance(observation_spec, Composite):
+            return observation_spec
+        if self.agent_group not in observation_spec.keys():
+            return observation_spec
+
+        group_spec = observation_spec[self.agent_group]
+        if "observation" not in group_spec.keys():
+            return observation_spec
+
+        obs_spec = group_spec["observation"]
+        if "valid_actions" not in obs_spec.keys():
+            return observation_spec
+
+        group_spec["action_mask"] = obs_spec["valid_actions"].clone()
+        return observation_spec
 
 
 class FlatlandMlpBenchmarkTransform(Transform):
@@ -171,7 +209,7 @@ def _write_manifest(
     model_name: str,
     run_name: str | None,
     task: Any,
-    experiment_config: ExperimentConfig,
+    experiment_configs_by_algorithm: dict[str, ExperimentConfig],
     algorithm_configs: Sequence[Any],
     model_config: Any,
     critic_model_config: Any,
@@ -183,79 +221,65 @@ def _write_manifest(
         "model_name": model_name,
         "save_folder": str(run_dir),
         "algorithms": [
-            type(config).__name__.replace("Config", "").lower()
-            for config in algorithm_configs
+            _algorithm_name_from_config(config) for config in algorithm_configs
         ],
         "seed": seed,
         "task": _serialize_config(task.config),
-        "experiment": _serialize_config(experiment_config),
+        "experiment_config_dir": str(SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR),
+        "experiment_by_algorithm": {
+            name: _serialize_config(config)
+            for name, config in experiment_configs_by_algorithm.items()
+        },
         "model": _serialize_config(model_config),
         "critic_model": _serialize_config(critic_model_config),
-        "expected_evaluation_step_count": 1
-        + experiment_config.max_n_frames // experiment_config.evaluation_interval,
     }
     with open(run_dir / "manifest.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(manifest, f, sort_keys=False)
 
 
-def _build_experiment_config(model_name: str, save_folder: Path) -> ExperimentConfig:
+def _load_yaml_dict(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a mapping in {path}, got {type(data).__name__}")
+    return data
+
+
+def _resolve_device_token(value: Any, train_device: str) -> Any:
+    if isinstance(value, str) and value in {"auto", "train_device"}:
+        return train_device
+    return value
+
+
+def _algorithm_name_from_config(algorithm_config: Any) -> str:
+    return type(algorithm_config).__name__.replace("Config", "").lower()
+
+
+def _build_experiment_config(
+    model_name: str,
+    run_dir: Path,
+    algorithm_name: str,
+) -> ExperimentConfig:
     config = ExperimentConfig.get_from_yaml()
     train_device = _resolve_train_device()
-    max_n_frames = 3_000_000
 
-    config.sampling_device = "cpu"
-    config.train_device = train_device
-    config.buffer_device = train_device
+    base_overrides = _load_yaml_dict(
+        SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR / "base.yaml"
+    )
+    algorithm_overrides = _load_yaml_dict(
+        SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR / f"{algorithm_name}.yaml"
+    )
 
-    config.share_policy_params = True
-    config.prefer_continuous_actions = False
-
-    config.lr = 5e-5
-    config.gamma = 0.99
-
-    config.max_n_frames = max_n_frames
-    config.max_n_iters = None
-
-    # BenchMARL/TorchRL uses linear epsilon annealing in EGreedyModule.
-    # We match the referenced schedule by using the same initial epsilon and
-    # setting the final epsilon to the reference exponential schedule value
-    # at x = max_n_frames.
-    config.exploration_eps_init = 0.8
-    config.exploration_eps_end = 0.01
-    config.exploration_anneal_frames = 1_000_000
-
-    # PPO-style settings kept intentionally small for the short benchmark.
-    config.on_policy_collected_frames_per_batch = 6_000
-    config.on_policy_n_envs_per_worker = 10
-    config.on_policy_n_minibatch_iters = 45
-    config.on_policy_minibatch_size = 400
-
-    # Match the requested off-policy setup.
-    config.off_policy_collected_frames_per_batch = 6000
-    config.off_policy_n_envs_per_worker = 10
-    config.off_policy_n_optimizer_steps = 100
-    config.off_policy_train_batch_size = 100
-    config.off_policy_memory_size = 1_000_000
-    config.off_policy_init_random_frames = 100
-
-    config.evaluation = True
-    config.render = False
-    config.evaluation_interval = 120_000
-    config.evaluation_episodes = 200
-    config.evaluation_deterministic_actions = True
-    config.evaluation_static = False
-
-    config.loggers = ["tensorboard", "csv"]
-    config.create_json = True
-
-    config.checkpoint_interval = 0
-    config.checkpoint_at_end = True
-    config.keep_checkpoints_num = 1
+    merged_overrides = {**base_overrides, **algorithm_overrides}
+    for key, value in merged_overrides.items():
+        setattr(config, key, _resolve_device_token(value, train_device))
 
     if model_name != "mlp":
         config.disable_value_estimator_vmap = True
 
-    config.save_folder = str(save_folder)
+    algo_save_folder = run_dir / algorithm_name
+    algo_save_folder.mkdir(parents=True, exist_ok=True)
+    config.save_folder = str(algo_save_folder)
     return config
 
 
@@ -283,9 +307,14 @@ def _print_hydra_config(
 ) -> None:
     payload = {
         "experiment": _serialize_config(experiment_config),
+        "algorithm_name": _algorithm_name_from_config(algorithm_config),
         "algorithm": _serialize_config(algorithm_config),
         "task": _serialize_config(task.config),
+        "model_name": type(model_config).__name__.replace("Config", "").lower(),
         "model": _serialize_config(model_config),
+        "critic_model_name": type(critic_model_config)
+        .__name__.replace("Config", "")
+        .lower(),
         "critic_model": _serialize_config(critic_model_config),
         "seed": seed,
     }
@@ -301,6 +330,29 @@ def _build_tree_task():
             "num_steps": 200,
         }
     )
+
+    base_get_env_transforms = task.get_env_transforms
+
+    def get_env_transforms(self, env: EnvBase):
+        transforms = list(base_get_env_transforms(env))
+        transforms.append(FlatlandTreeActionMaskTransform(agent_group=AGENT_GROUP))
+        return transforms
+
+    def action_mask_spec(self, env: EnvBase) -> Composite | None:
+        observation_spec = env.observation_spec.clone()
+        for group in self.group_map(env):
+            group_obs_spec = observation_spec[group]
+            for key in list(group_obs_spec.keys()):
+                if key != "action_mask":
+                    del group_obs_spec[key]
+            if group_obs_spec.is_empty():
+                del observation_spec[group]
+        if observation_spec.is_empty():
+            return None
+        return observation_spec
+
+    task.get_env_transforms = MethodType(get_env_transforms, task)
+    task.action_mask_spec = MethodType(action_mask_spec, task)
     return task
 
 
@@ -406,11 +458,10 @@ def main() -> None:
 
     task = _build_task(model_name)
     model_config, critic_model_config = _build_model_configs(model_name)
-    experiment_config = _build_experiment_config(model_name, save_folder=run_dir)
 
     algorithm_configs = [
-        IppoConfig.get_from_yaml(),
-        MappoConfig.get_from_yaml(),
+        #  IppoConfig.get_from_yaml(),
+        # MappoConfig.get_from_yaml(),
         MasacConfig.get_from_yaml(),
         IqlConfig.get_from_yaml(),
         VdnConfig.get_from_yaml(),
@@ -420,12 +471,21 @@ def main() -> None:
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
 
+    experiment_configs_by_algorithm: dict[str, ExperimentConfig] = {}
+    for algorithm_config in algorithm_configs:
+        algorithm_name = _algorithm_name_from_config(algorithm_config)
+        experiment_configs_by_algorithm[algorithm_name] = _build_experiment_config(
+            model_name=model_name,
+            run_dir=run_dir,
+            algorithm_name=algorithm_name,
+        )
+
     _write_manifest(
         run_dir,
         model_name=model_name,
         run_name=args.run_name,
         task=task,
-        experiment_config=experiment_config,
+        experiment_configs_by_algorithm=experiment_configs_by_algorithm,
         algorithm_configs=algorithm_configs,
         model_config=model_config,
         critic_model_config=critic_model_config,
@@ -434,6 +494,9 @@ def main() -> None:
     print(f"\nBenchmark run folder: {run_dir}\n")
 
     for algorithm_config in algorithm_configs:
+        algorithm_name = _algorithm_name_from_config(algorithm_config)
+        experiment_config = experiment_configs_by_algorithm[algorithm_name]
+
         _print_hydra_config(
             experiment_config=experiment_config,
             algorithm_config=algorithm_config,
@@ -443,15 +506,15 @@ def main() -> None:
             seed=0,
         )
 
-    benchmark = Benchmark(
-        algorithm_configs=algorithm_configs,
-        model_config=model_config,
-        critic_model_config=critic_model_config,
-        tasks=[task],
-        seeds={0},
-        experiment_config=experiment_config,
-    )
-    benchmark.run_sequential()
+        benchmark = Benchmark(
+            algorithm_configs=[algorithm_config],
+            model_config=model_config,
+            critic_model_config=critic_model_config,
+            tasks=[task],
+            seeds={0},
+            experiment_config=experiment_config,
+        )
+        benchmark.run_sequential()
 
 
 if __name__ == "__main__":
