@@ -13,8 +13,8 @@ from benchmarl.environments.common import Task, TaskClass
 
 @dataclass
 class TaskConfig:
-    map_width: int = 25
-    map_height: int = 25
+    map_width: int = 30
+    map_height: int = 30
     num_agents: int = 2
     num_steps: int = 1000
     reward_coefs: Optional[dict] = None
