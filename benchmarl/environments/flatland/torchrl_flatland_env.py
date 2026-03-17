@@ -145,17 +145,10 @@ class FlatlandRailEnv(RailEnv):
                 arrival_reward = 1
 
         if self.reward_coefs.deadlock_penalty != 0:
-            if (
-                agent.state == TrainState.DONE
-                and agent.state_machine.previous_state != TrainState.DONE
-                and self._elapsed_steps <= agent.latest_arrival
+            if (agent.position in self.motionCheck.svDeadlocked) and (
+                agent.position not in self.previous_deadlocked
             ):
-                if i_agent in self.previous_deadlocked:
-                    deadlock_penalty = 0
-                else:
-                    deadlock_penalty = 0
-            else:
-                deadlock_penalty = -self.reward_coefs.deadlock_penalty
+                deadlock_penalty = -1
 
         if self.reward_coefs.departure_reward != 0:
             if (

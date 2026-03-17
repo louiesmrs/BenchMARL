@@ -321,7 +321,7 @@ def _print_hydra_config(
 def _build_tree_task():
     task = FlatlandTask.FLATLAND.get_from_yaml()
     reward_coefs = dict(task.config.get("reward_coefs") or {})
-    reward_coefs["departure_reward"] = 1
+    reward_coefs["delay_reward"] = 1
     task.config.update(
         {
             "num_agents": 2,
