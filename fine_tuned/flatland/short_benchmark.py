@@ -322,10 +322,10 @@ def _build_tree_task():
     task = FlatlandTask.FLATLAND.get_from_yaml()
     reward_coefs = dict(task.config.get("reward_coefs") or {})
     reward_coefs["delay_reward"] = 1
+    reward_coefs["departure_reward"] = 1
     task.config.update(
         {
             "num_agents": 2,
-            "num_steps": 200,
             "reward_coefs": reward_coefs,
         }
     )
@@ -460,10 +460,10 @@ def main() -> None:
 
     algorithm_configs = [
         IppoConfig.get_from_yaml(),
-        MappoConfig.get_from_yaml(),
-        MasacConfig.get_from_yaml(),
-        IqlConfig.get_from_yaml(),
-        VdnConfig.get_from_yaml(),
+        #  MappoConfig.get_from_yaml(),
+        #  MasacConfig.get_from_yaml(),
+        #  IqlConfig.get_from_yaml(),
+        #  VdnConfig.get_from_yaml(),
     ]
 
     for algorithm_config in algorithm_configs:
