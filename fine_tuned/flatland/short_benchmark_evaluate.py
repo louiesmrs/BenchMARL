@@ -101,18 +101,32 @@ def _load_checkpoint_metadata(checkpoint_file: Path):
 
 def _infer_model_name(model_config: Any) -> str:
     name = type(model_config).__name__.lower()
+
     if "treelstm" in name:
         return "treelstm"
     if "treetransformer" in name or "tree_transformer" in name:
         return "treetransformer"
     if "treegnn" in name:
         return "treegnn"
+
+    if "sequence" in name and hasattr(model_config, "model_configs"):
+        model_layers = list(getattr(model_config, "model_configs") or [])
+        if len(model_layers) >= 2:
+            first = type(model_layers[0]).__name__.lower()
+            second = type(model_layers[1]).__name__.lower()
+            if "flatlandtreelstmfeature" in first:
+                if second.startswith("gru"):
+                    return "treelstm_gru"
+                if second.startswith("mlp"):
+                    return "treelstm_mlp"
+
     if name.startswith("lstm"):
         return "lstm_mlp"
     if name.startswith("gru"):
         return "gru_mlp"
     if "mlp" in name:
         return "mlp"
+
     raise ValueError(f"Could not infer model family from {type(model_config).__name__}")
 
 

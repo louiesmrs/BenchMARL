@@ -68,6 +68,8 @@ def _parse_args() -> argparse.Namespace:
             "gru_mlp",
             "treelstm",
             "treeltsm",
+            "treelstm_gru",
+            "treelstm_mlp",
             "treetransformer",
             "treegnn",
         ],
@@ -234,6 +236,7 @@ def main() -> None:
         algorithm_config = IppoConfig.get_from_yaml()
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
+        sb._apply_tree_algorithm_overrides(algorithm_config, model_name)
 
         experiment_config = sb._build_experiment_config(
             model_name=model_name,

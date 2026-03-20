@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import sys
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -22,6 +23,9 @@ BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
 SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR = (
     Path(__file__).resolve().parent / "conf" / "experiment" / "short_benchmark"
 )
+TREE_BASE_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "conf" / "experiment" / "base_tree.yaml"
+)
 sys.path.insert(0, str(BENCHMARL_ROOT))
 
 from benchmarl.algorithms import (
@@ -37,7 +41,9 @@ from benchmarl.experiment import ExperimentConfig
 from benchmarl.models import (
     FlatlandTreeGNNCriticConfig,
     FlatlandTreeGNNPolicyConfig,
+    FlatlandTreeLSTMCriticConfig,
     FlatlandTreeLSTMFeatureConfig,
+    FlatlandTreeLSTMPolicyConfig,
     FlatlandTreeTransformerCriticConfig,
     FlatlandTreeTransformerPolicyConfig,
     GruConfig,
@@ -173,8 +179,9 @@ def _parse_args() -> argparse.Namespace:
             "gru",
             "gru_mlp",
             "treelstm",
-            "treelstm_mlp",
             "treeltsm",
+            "treelstm_gru",
+            "treelstm_mlp",
             "treetransformer",
             "treegnn",
         ],
@@ -257,6 +264,78 @@ def _load_yaml_dict(path: Path) -> dict[str, Any]:
     return data
 
 
+TREE_MODEL_NAMES = {
+    "treelstm",
+    "treelstm_gru",
+    "treelstm_mlp",
+    "treetransformer",
+    "treegnn",
+}
+
+
+def _is_tree_model(model_name: str) -> bool:
+    return model_name in TREE_MODEL_NAMES
+
+
+@functools.lru_cache(maxsize=1)
+def _load_tree_base_overrides() -> dict[str, Any]:
+    if not TREE_BASE_CONFIG_PATH.exists():
+        return {}
+    return _load_yaml_dict(TREE_BASE_CONFIG_PATH)
+
+
+def _apply_overrides_if_present(config_obj: Any, overrides: dict[str, Any]) -> None:
+    for key, value in overrides.items():
+        if hasattr(config_obj, key):
+            setattr(config_obj, key, value)
+
+
+def _apply_tree_experiment_overrides(config: ExperimentConfig, model_name: str) -> None:
+    if not _is_tree_model(model_name):
+        return
+    tree_base = _load_tree_base_overrides()
+    _apply_overrides_if_present(config, tree_base.get("experiment", {}))
+
+
+def _apply_tree_algorithm_overrides(algorithm_config: Any, model_name: str) -> None:
+    if not _is_tree_model(model_name):
+        return
+    tree_base = _load_tree_base_overrides()
+    _apply_overrides_if_present(algorithm_config, tree_base.get("algorithm", {}))
+
+
+def _apply_tree_model_overrides(
+    model_config: Any,
+    critic_model_config: Any,
+    model_name: str,
+) -> None:
+    if not _is_tree_model(model_name):
+        return
+
+    tree_base = _load_tree_base_overrides()
+    actor_tree_overrides = tree_base.get("model", {})
+    critic_tree_overrides = tree_base.get("critic_model", actor_tree_overrides)
+    recurrent_overrides = tree_base.get("sequence_recurrent_model", {})
+    mlp_overrides = tree_base.get("sequence_mlp_model", {})
+
+    def apply(config_obj: Any, direct_tree_overrides: dict[str, Any]) -> None:
+        if isinstance(config_obj, SequenceModelConfig):
+            for layer in config_obj.model_configs:
+                layer_name = type(layer).__name__.lower()
+                if "flatlandtree" in layer_name:
+                    _apply_overrides_if_present(layer, direct_tree_overrides)
+                elif layer_name.startswith("gru") or layer_name.startswith("lstm"):
+                    _apply_overrides_if_present(layer, recurrent_overrides)
+                elif layer_name.startswith("mlp"):
+                    _apply_overrides_if_present(layer, mlp_overrides)
+            return
+
+        _apply_overrides_if_present(config_obj, direct_tree_overrides)
+
+    apply(model_config, actor_tree_overrides)
+    apply(critic_model_config, critic_tree_overrides)
+
+
 def _resolve_device_token(value: Any, train_device: str) -> Any:
     if isinstance(value, str) and value in {"auto", "train_device"}:
         return train_device
@@ -285,6 +364,8 @@ def _build_experiment_config(
     merged_overrides = {**base_overrides, **algorithm_overrides}
     for key, value in merged_overrides.items():
         setattr(config, key, _resolve_device_token(value, train_device))
+
+    _apply_tree_experiment_overrides(config, model_name)
 
     if model_name != "mlp" and model_name != "lstm_mlp" and model_name != "gru_mlp":
         config.disable_value_estimator_vmap = True
@@ -447,6 +528,15 @@ def _build_model_configs(model_name: str):
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
         )
     if model_name == "treelstm":
+        model_config = FlatlandTreeLSTMPolicyConfig.get_from_yaml(
+            str(model_root / "flatland_treelstm.yaml")
+        )
+        critic_model_config = FlatlandTreeLSTMCriticConfig.get_from_yaml(
+            str(model_root / "flatland_treelstm_critic.yaml")
+        )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
+        return model_config, critic_model_config
+    if model_name == "treelstm_gru":
         tree_feature_path = model_root / "flatland_treelstm_feature.yaml"
         gru_path = model_root / "gru.yaml"
         intermediate_size = 128
@@ -465,6 +555,7 @@ def _build_model_configs(model_name: str):
             ],
             intermediate_sizes=[intermediate_size],
         )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
         return model_config, critic_model_config
     if model_name == "treelstm_mlp":
         tree_feature_path = model_root / "flatland_treelstm_feature.yaml"
@@ -485,25 +576,26 @@ def _build_model_configs(model_name: str):
             ],
             intermediate_sizes=[intermediate_size],
         )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
         return model_config, critic_model_config
     if model_name == "treetransformer":
-        return (
-            FlatlandTreeTransformerPolicyConfig.get_from_yaml(
-                str(model_root / "flatland_tree_transformer.yaml")
-            ),
-            FlatlandTreeTransformerCriticConfig.get_from_yaml(
-                str(model_root / "flatland_tree_transformer_critic.yaml")
-            ),
+        model_config = FlatlandTreeTransformerPolicyConfig.get_from_yaml(
+            str(model_root / "flatland_tree_transformer.yaml")
         )
+        critic_model_config = FlatlandTreeTransformerCriticConfig.get_from_yaml(
+            str(model_root / "flatland_tree_transformer_critic.yaml")
+        )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
+        return model_config, critic_model_config
     if model_name == "treegnn":
-        return (
-            FlatlandTreeGNNPolicyConfig.get_from_yaml(
-                str(model_root / "flatland_treegnn.yaml")
-            ),
-            FlatlandTreeGNNCriticConfig.get_from_yaml(
-                str(model_root / "flatland_treegnn_critic.yaml")
-            ),
+        model_config = FlatlandTreeGNNPolicyConfig.get_from_yaml(
+            str(model_root / "flatland_treegnn.yaml")
         )
+        critic_model_config = FlatlandTreeGNNCriticConfig.get_from_yaml(
+            str(model_root / "flatland_treegnn_critic.yaml")
+        )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
+        return model_config, critic_model_config
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -526,6 +618,7 @@ def main() -> None:
     for algorithm_config in algorithm_configs:
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
+        _apply_tree_algorithm_overrides(algorithm_config, model_name)
 
     experiment_configs_by_algorithm: dict[str, ExperimentConfig] = {}
     for algorithm_config in algorithm_configs:

@@ -1,0 +1,38 @@
+experiment:
+  # Tree encoders are harder to optimize than flat MLP baselines.
+  # Use a gentler optimizer / clipping regime by default.
+  lr: 2.0e-05
+  clip_grad_val: 1.0
+
+algorithm:
+  # Encourage exploration and reduce critic dominance for early tree-model stability.
+  entropy_coef: 0.0005
+  critic_coef: 0.1
+
+# Applies to direct tree policy/critic configs (treelstm, treetransformer, treegnn)
+model:
+  hidden_size: 64
+  tree_embedding_size: 64
+  transformer_layers: 1
+  transformer_heads: 2
+  transformer_ff_mult: 2
+  gnn_layers: 1
+  gnn_heads: 2
+
+critic_model:
+  hidden_size: 64
+  tree_embedding_size: 64
+  transformer_layers: 1
+  transformer_heads: 2
+  transformer_ff_mult: 2
+  gnn_layers: 1
+  gnn_heads: 2
+
+# Applies to non-tree second stage when using sequence hybrids.
+sequence_recurrent_model:
+  hidden_size: 64
+  n_layers: 1
+  mlp_num_cells: [128, 128]
+
+sequence_mlp_model:
+  num_cells: [128, 128]
