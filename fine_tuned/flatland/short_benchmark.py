@@ -286,7 +286,7 @@ def _build_experiment_config(
     for key, value in merged_overrides.items():
         setattr(config, key, _resolve_device_token(value, train_device))
 
-    if model_name != "mlp":
+    if model_name != "mlp" and model_name != "lstm_mlp" and model_name != "gru_mlp":
         config.disable_value_estimator_vmap = True
 
     algo_save_folder = run_dir / algorithm_name
