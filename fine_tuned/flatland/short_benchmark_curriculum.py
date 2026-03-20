@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import re
 import sys
 from datetime import datetime
@@ -24,6 +25,7 @@ DEFAULT_CURRICULUM = (
     / "short_benchmark_curriculum.yaml"
 )
 SHORT_BENCHMARK_PATH = Path(__file__).resolve().parent / "short_benchmark.py"
+DEFAULT_CHECKPOINT_INTERVAL_FRAMES = 2_000_000
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,6 +55,23 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="1-indexed phase number to start from (default: 1).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="mlp",
+        choices=[
+            "mlp",
+            "lstm",
+            "lstm_mlp",
+            "gru",
+            "gru_mlp",
+            "treelstm",
+            "treeltsm",
+            "treetransformer",
+            "treegnn",
+        ],
+        help="Model family to run for each curriculum phase.",
     )
     parser.add_argument(
         "--run-name",
@@ -105,6 +124,14 @@ def _latest_checkpoint_recursive(root: Path) -> Path | None:
     return candidates[-1][2]
 
 
+def _align_interval(desired_frames: int, frames_per_batch: int) -> int:
+    if desired_frames <= 0:
+        return 0
+    if frames_per_batch <= 0:
+        raise ValueError(f"frames_per_batch must be positive, got {frames_per_batch}")
+    return int(math.ceil(desired_frames / frames_per_batch) * frames_per_batch)
+
+
 def _make_run_dir(run_name: str | None) -> Path:
     root = Path(__file__).resolve().parent / "short_benchmark_runs"
     root.mkdir(parents=True, exist_ok=True)
@@ -132,6 +159,7 @@ def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 def main() -> None:
     args = _parse_args()
     sb = _load_short_benchmark_module()
+    model_name = sb._normalize_model_name(args.model)
 
     curriculum_path = args.curriculum.resolve()
     if not curriculum_path.exists():
@@ -162,6 +190,7 @@ def main() -> None:
     manifest: dict[str, Any] = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "curriculum_yaml": str(curriculum_path),
+        "model_name": model_name,
         "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint is not None else None,
         "start_phase": args.start_phase,
         "phases_total": len(phases),
@@ -198,16 +227,16 @@ def main() -> None:
         base_frames = _checkpoint_frames(current_checkpoint) if current_checkpoint is not None else 0
         target_frames = base_frames + phase_frames
 
-        task = sb._build_mlp_task()
+        task = sb._build_task(model_name)
         _deep_update(task.config, task_overrides)
 
-        model_config, critic_model_config = sb._build_model_configs("mlp")
+        model_config, critic_model_config = sb._build_model_configs(model_name)
         algorithm_config = IppoConfig.get_from_yaml()
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
 
         experiment_config = sb._build_experiment_config(
-            model_name="mlp",
+            model_name=model_name,
             run_dir=phase_dir,
             algorithm_name="ippo",
         )
@@ -216,6 +245,18 @@ def main() -> None:
         )
         experiment_config.max_n_frames = target_frames
         experiment_config.evaluation_only = False
+
+        # Default checkpointing policy for curriculum runs:
+        # save roughly every 2.0M frames (aligned to collector batch size), keep all.
+        frames_per_batch = int(experiment_config.on_policy_collected_frames_per_batch)
+        resolved_interval = _align_interval(
+            DEFAULT_CHECKPOINT_INTERVAL_FRAMES, frames_per_batch
+        )
+        if "checkpoint_interval" not in exp_overrides:
+            experiment_config.checkpoint_interval = resolved_interval
+        if "keep_checkpoints_num" not in exp_overrides:
+            experiment_config.keep_checkpoints_num = None
+
         for key, value in exp_overrides.items():
             if not hasattr(experiment_config, key):
                 raise ValueError(
@@ -231,6 +272,12 @@ def main() -> None:
             else "Start checkpoint: <fresh start>"
         )
         print(f"Frames: base={base_frames}, add={phase_frames}, target={target_frames}")
+        print(
+            "Checkpoint interval: "
+            f"{experiment_config.checkpoint_interval} frames "
+            f"(requested≈{DEFAULT_CHECKPOINT_INTERVAL_FRAMES}, "
+            f"collector_batch={frames_per_batch})"
+        )
         print(f"Output root: {phase_dir}")
 
         sb._print_hydra_config(
@@ -265,8 +312,11 @@ def main() -> None:
             "base_frames": base_frames,
             "phase_timesteps": phase_frames,
             "target_frames": target_frames,
+            "model_name": model_name,
             "task_config": sb._serialize_config(task.config),
             "experiment_overrides": exp_overrides,
+            "checkpoint_interval": experiment_config.checkpoint_interval,
+            "keep_checkpoints_num": experiment_config.keep_checkpoints_num,
         }
         manifest["phases"].append(phase_record)
         _write_manifest(run_dir / "manifest.yaml", manifest)

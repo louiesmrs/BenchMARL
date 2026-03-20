@@ -41,6 +41,8 @@ from benchmarl.models import (
     FlatlandTreeLSTMPolicyConfig,
     FlatlandTreeTransformerCriticConfig,
     FlatlandTreeTransformerPolicyConfig,
+    GruConfig,
+    LstmConfig,
     MlpConfig,
 )
 
@@ -164,7 +166,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="mlp",
-        choices=["mlp", "treelstm", "treeltsm", "treetransformer", "treegnn"],
+        choices=[
+            "mlp",
+            "lstm",
+            "lstm_mlp",
+            "gru",
+            "gru_mlp",
+            "treelstm",
+            "treeltsm",
+            "treetransformer",
+            "treegnn",
+        ],
         help="Model family to benchmark. Defaults to mlp.",
     )
     parser.add_argument(
@@ -176,9 +188,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _normalize_model_name(model_name: str) -> str:
-    if model_name == "treeltsm":
-        return "treelstm"
-    return model_name
+    aliases = {
+        "treeltsm": "treelstm",
+        "lstm": "lstm_mlp",
+        "gru": "gru_mlp",
+    }
+    return aliases.get(model_name, model_name)
 
 
 def _resolve_train_device() -> str:
@@ -322,7 +337,7 @@ def _build_tree_task():
     task = FlatlandTask.FLATLAND.get_from_yaml()
     reward_coefs = dict(task.config.get("reward_coefs") or {})
     reward_coefs["delay_reward"] = 1
-    reward_coefs["departure_reward"] = 1
+    #   reward_coefs["departure_reward"] = 1
     task.config.update(
         {
             "num_agents": 2,
@@ -411,7 +426,7 @@ def _build_mlp_task():
 
 
 def _build_task(model_name: str):
-    if model_name == "mlp":
+    if model_name in {"mlp", "lstm_mlp", "gru_mlp"}:
         return _build_mlp_task()
     return _build_tree_task()
 
@@ -420,6 +435,16 @@ def _build_model_configs(model_name: str):
     model_root = BENCHMARL_ROOT / "benchmarl" / "conf" / "model" / "layers"
     if model_name == "mlp":
         return MlpConfig.get_from_yaml(), MlpConfig.get_from_yaml()
+    if model_name == "lstm_mlp":
+        return (
+            LstmConfig.get_from_yaml(str(model_root / "lstm.yaml")),
+            LstmConfig.get_from_yaml(str(model_root / "lstm.yaml")),
+        )
+    if model_name == "gru_mlp":
+        return (
+            GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
+            GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
+        )
     if model_name == "treelstm":
         return (
             FlatlandTreeLSTMPolicyConfig.get_from_yaml(

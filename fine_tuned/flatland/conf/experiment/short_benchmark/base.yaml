@@ -15,10 +15,10 @@ exploration_eps_init: 0.8
 exploration_eps_end: 0.01
 exploration_anneal_frames: 1_000_000
 
-on_policy_collected_frames_per_batch: 6_000
-on_policy_n_envs_per_worker: 10
+on_policy_collected_frames_per_batch: 12_000
+on_policy_n_envs_per_worker: 240
 on_policy_n_minibatch_iters: 45
-on_policy_minibatch_size: 400
+on_policy_minibatch_size: 800
 
 off_policy_collected_frames_per_batch: 6_000
 off_policy_n_envs_per_worker: 10
@@ -29,8 +29,8 @@ off_policy_init_random_frames: 0
 
 evaluation: true
 render: false
-evaluation_interval: 120_000
-evaluation_episodes: 200
+evaluation_interval: 300_000
+evaluation_episodes: 20
 evaluation_deterministic_actions: true
 evaluation_static: false
 
