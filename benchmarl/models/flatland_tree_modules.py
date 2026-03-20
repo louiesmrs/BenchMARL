@@ -30,6 +30,13 @@ class AgentAttentionBlock(nn.Module):
 
 
 class TreeLSTM(nn.Module):
+    """Reference-style child-sum TreeLSTM for fixed-arity Flatland trees.
+
+    The implementation intentionally mirrors the successful Flatland baselines:
+    update nodes by ``node_order`` iteration, gather children by ``edge_order``,
+    and aggregate each parent's children into three slots ``[-1, 0, 1]``.
+    """
+
     def __init__(
         self,
         in_features: int,
@@ -43,12 +50,14 @@ class TreeLSTM(nn.Module):
         self.branching_factor = branching_factor
         self.max_iterations = max_iterations
 
+        # i/o/u gates
         self.W_iou = nn.Linear(self.in_features, 3 * self.out_features)
         self.U_iou = nn.Linear(3 * self.out_features, 3 * self.out_features, bias=False)
-        self.W_c = nn.Linear(3 * self.out_features, self.out_features)
 
+        # forget path
         self.W_f = nn.Linear(self.in_features, self.out_features)
         self.U_f = nn.Linear(self.out_features, self.out_features, bias=False)
+        self.W_c = nn.Linear(3 * self.out_features, self.out_features)
 
     def forward(
         self,
@@ -57,106 +66,112 @@ class TreeLSTM(nn.Module):
         node_order: torch.Tensor,
         edge_order: torch.Tensor,
     ) -> torch.Tensor:
-        if adjacency.shape[-1] < 3:
+        if adjacency.shape[-1] < 2:
             raise ValueError(
-                "TreeLSTM expects adjacency with three columns (parent, child, slot)"
+                "TreeLSTM expects adjacency with at least two columns (parent, child)"
             )
 
         forest_flat = forest.reshape(-1, self.in_features)
-        adjacency_flat = adjacency[..., :3].reshape(-1, 3)
-        node_order_flat = node_order.reshape(-1)
-        edge_order_flat = edge_order.reshape(-1)
+        adjacency_flat = adjacency.reshape(-1, adjacency.shape[-1]).to(torch.long)
+        node_order_flat = node_order.reshape(-1).to(torch.long)
+        edge_order_flat = edge_order.reshape(-1).to(torch.long)
 
         total_nodes = forest_flat.shape[0]
         device = forest_flat.device
+        dtype = forest_flat.dtype
 
-        h = torch.zeros(total_nodes, self.out_features, device=device)
-        c = torch.zeros(total_nodes, self.out_features, device=device)
+        h = torch.zeros(total_nodes, self.out_features, device=device, dtype=dtype)
+        c = torch.zeros_like(h)
 
         if node_order_flat.numel() == 0:
             return h
 
-        parent_idx = adjacency_flat[:, 0].to(torch.long)
-        child_idx = adjacency_flat[:, 1].to(torch.long)
-        slot_idx = (adjacency_flat[:, 2].to(torch.long) + 1).clamp(
-            0, self.branching_factor - 1
-        )
-
-        valid_edge = (
-            (parent_idx >= 0)
-            & (parent_idx < total_nodes)
-            & (child_idx >= 0)
-            & (child_idx < total_nodes)
-        )
-
-        safe_parent = parent_idx.clamp(0, total_nodes - 1)
-        safe_child = child_idx.clamp(0, total_nodes - 1)
-        flat_index = safe_parent * self.branching_factor + slot_idx
-
-        node_mask = node_order_flat.unsqueeze(1) == torch.arange(
-            self.max_iterations, device=device
-        )
-        edge_mask = edge_order_flat.unsqueeze(1) == torch.arange(
-            self.max_iterations, device=device
-        )
-
-        forest_iou = self.W_iou(forest_flat)
-        parent_feat = forest_flat[safe_parent]
-        parent_feat_proj = self.W_f(parent_feat)
-
-        for iteration in range(self.max_iterations):
-            node_mask_t = node_mask[:, iteration].unsqueeze(-1)
-            edge_mask_t = edge_mask[:, iteration]
-            edge_weight = (valid_edge & edge_mask_t).unsqueeze(-1).to(forest_flat.dtype)
-
-            child_h = h[safe_child] * edge_weight
-            child_c = c[safe_child] * edge_weight
-
-            flat_h = torch.zeros(
-                total_nodes * self.branching_factor,
-                self.out_features,
-                device=device,
-                dtype=forest_flat.dtype,
-            ).index_add(0, flat_index, child_h)
-            flat_c = torch.zeros(
-                total_nodes * self.branching_factor,
-                self.out_features,
-                device=device,
-                dtype=forest_flat.dtype,
-            ).index_add(0, flat_index, child_c)
-
-            child_h_merge = flat_h.view(
-                total_nodes, self.branching_factor * self.out_features
-            )
-            child_c_merge = flat_c.view(
-                total_nodes, self.branching_factor * self.out_features
+        max_order = int(node_order_flat.max().item())
+        n_iterations = max_order + 1
+        if n_iterations > self.max_iterations:
+            raise ValueError(
+                f"TreeLSTM node_order requires {n_iterations} iterations, "
+                f"but max_iterations={self.max_iterations}."
             )
 
-            iou = forest_iou + self.U_iou(child_h_merge)
+        for iteration in range(n_iterations):
+            node_mask = node_order_flat == iteration
+            if not node_mask.any():
+                continue
+
+            x = forest_flat[node_mask]
+            iou = self.W_iou(x)
+            c_reduce = torch.zeros(x.shape[0], self.out_features, device=device, dtype=dtype)
+
+            if iteration > 0:
+                edge_mask = edge_order_flat == iteration
+                if edge_mask.any():
+                    edges_it = adjacency_flat[edge_mask]
+                    parent_idx = edges_it[:, 0]
+                    child_idx = edges_it[:, 1]
+
+                    valid = (
+                        (parent_idx >= 0)
+                        & (parent_idx < total_nodes)
+                        & (child_idx >= 0)
+                        & (child_idx < total_nodes)
+                    )
+
+                    parent_idx = parent_idx[valid]
+                    child_idx = child_idx[valid]
+
+                    if parent_idx.numel() > 0:
+                        if edges_it.shape[-1] > 2:
+                            slot_idx = (edges_it[:, 2][valid] + 1).clamp(
+                                0, self.branching_factor - 1
+                            )
+                        else:
+                            slot_idx = (
+                                torch.arange(parent_idx.numel(), device=device)
+                                % self.branching_factor
+                            )
+
+                        child_h = h[child_idx]
+                        child_c = c[child_idx]
+                        flat_index = parent_idx * self.branching_factor + slot_idx
+
+                        flat_h = torch.zeros(
+                            total_nodes * self.branching_factor,
+                            self.out_features,
+                            device=device,
+                            dtype=dtype,
+                        ).index_add(0, flat_index, child_h)
+                        child_h_merge = flat_h.view(
+                            total_nodes, self.branching_factor * self.out_features
+                        )
+                        iou = iou + self.U_iou(child_h_merge[node_mask])
+
+                        f = self.W_f(forest_flat[parent_idx]) + self.U_f(child_h)
+                        f = torch.sigmoid(f)
+                        fc = f * child_c
+
+                        flat_fc = torch.zeros(
+                            total_nodes * self.branching_factor,
+                            self.out_features,
+                            device=device,
+                            dtype=dtype,
+                        ).index_add(0, flat_index, fc)
+                        c_reduce_all = self.W_c(
+                            flat_fc.view(
+                                total_nodes,
+                                self.branching_factor * self.out_features,
+                            )
+                        )
+                        c_reduce = c_reduce_all[node_mask]
+
             i, o, u = torch.split(iou, iou.size(1) // 3, dim=1)
             i = torch.sigmoid(i)
             o = torch.sigmoid(o)
             u = torch.tanh(u)
 
-            f = parent_feat_proj + self.U_f(child_h)
-            f = torch.sigmoid(f) * edge_weight
-            fc = f * child_c
-
-            flat_fc = torch.zeros(
-                total_nodes * self.branching_factor,
-                self.out_features,
-                device=device,
-                dtype=forest_flat.dtype,
-            ).index_add(0, flat_index, fc)
-            c_reduce = self.W_c(
-                flat_fc.view(total_nodes, self.branching_factor * self.out_features)
-            )
-
             new_c = i * u + c_reduce
-            new_h = o * torch.tanh(new_c)
-
-            c = torch.where(node_mask_t, new_c, c)
-            h = torch.where(node_mask_t, new_h, h)
+            c[node_mask] = new_c
+            h[node_mask] = o * torch.tanh(new_c)
 
         return h
 

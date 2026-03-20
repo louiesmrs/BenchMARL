@@ -37,13 +37,13 @@ from benchmarl.experiment import ExperimentConfig
 from benchmarl.models import (
     FlatlandTreeGNNCriticConfig,
     FlatlandTreeGNNPolicyConfig,
-    FlatlandTreeLSTMCriticConfig,
-    FlatlandTreeLSTMPolicyConfig,
+    FlatlandTreeLSTMFeatureConfig,
     FlatlandTreeTransformerCriticConfig,
     FlatlandTreeTransformerPolicyConfig,
     GruConfig,
     LstmConfig,
     MlpConfig,
+    SequenceModelConfig,
 )
 
 AGENT_GROUP = "agents"
@@ -173,6 +173,7 @@ def _parse_args() -> argparse.Namespace:
             "gru",
             "gru_mlp",
             "treelstm",
+            "treelstm_mlp",
             "treeltsm",
             "treetransformer",
             "treegnn",
@@ -446,14 +447,45 @@ def _build_model_configs(model_name: str):
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
         )
     if model_name == "treelstm":
-        return (
-            FlatlandTreeLSTMPolicyConfig.get_from_yaml(
-                str(model_root / "flatland_treelstm.yaml")
-            ),
-            FlatlandTreeLSTMCriticConfig.get_from_yaml(
-                str(model_root / "flatland_treelstm_critic.yaml")
-            ),
+        tree_feature_path = model_root / "flatland_treelstm_feature.yaml"
+        gru_path = model_root / "gru.yaml"
+        intermediate_size = 128
+
+        model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeLSTMFeatureConfig.get_from_yaml(str(tree_feature_path)),
+                GruConfig.get_from_yaml(str(gru_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
         )
+        critic_model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeLSTMFeatureConfig.get_from_yaml(str(tree_feature_path)),
+                GruConfig.get_from_yaml(str(gru_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        return model_config, critic_model_config
+    if model_name == "treelstm_mlp":
+        tree_feature_path = model_root / "flatland_treelstm_feature.yaml"
+        mlp_path = model_root / "mlp.yaml"
+        intermediate_size = 128
+
+        model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeLSTMFeatureConfig.get_from_yaml(str(tree_feature_path)),
+                MlpConfig.get_from_yaml(str(mlp_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        critic_model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeLSTMFeatureConfig.get_from_yaml(str(tree_feature_path)),
+                MlpConfig.get_from_yaml(str(mlp_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        return model_config, critic_model_config
     if model_name == "treetransformer":
         return (
             FlatlandTreeTransformerPolicyConfig.get_from_yaml(

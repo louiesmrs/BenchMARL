@@ -65,8 +65,6 @@ class FlatlandTreeEncoder(nn.Module):
         self.agent_group = agent_group
         self.n_agents = n_agents
 
-        self.embedding_key = (agent_group, "tree_embedding")
-        self.att_embedding_key = (agent_group, "tree_att_embedding")
         self.embedding_dim = self.hidden_size + self.tree_embedding_size
 
         self.attr_embedding = nn.Sequential(
@@ -137,35 +135,7 @@ class FlatlandTreeEncoder(nn.Module):
     def forward(
         self, tensordict: TensorDictBase
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cached = self._get_cached_embeddings(tensordict)
-        if cached is not None:
-            return cached
-        embedding, att_embedding = self._compute_embeddings(tensordict)
-        tensordict.set(self.embedding_key, embedding)
-        tensordict.set(self.att_embedding_key, att_embedding)
-        return embedding, att_embedding
-
-    def _get_cached_embeddings(
-        self, tensordict: TensorDictBase
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        keys = tensordict.keys(True, True)
-        if self.embedding_key not in keys or self.att_embedding_key not in keys:
-            return None
-        agents_attr = tensordict.get(
-            (self.agent_group, "observation", "agents_attr")
-        )
-        expected_shape = self._expected_embedding_shape(agents_attr)
-        embedding = tensordict.get(self.embedding_key)
-        att_embedding = tensordict.get(self.att_embedding_key)
-        if embedding.shape != expected_shape or att_embedding.shape != expected_shape:
-            return None
-        return embedding, att_embedding
-
-    def _expected_embedding_shape(self, agents_attr: torch.Tensor) -> tuple[int, ...]:
-        batch_dims = agents_attr.shape[:-2]
-        if batch_dims:
-            return (*batch_dims, self.n_agents, self.embedding_dim)
-        return (self.n_agents, self.embedding_dim)
+        return self._compute_embeddings(tensordict)
 
     def _modify_adjacency(self, adjacency: torch.Tensor) -> torch.Tensor:
         adjacency = adjacency.clone()
@@ -339,6 +309,9 @@ class FlatlandTreeEncoder(nn.Module):
         if batch_dims:
             embedding = embedding.reshape(*batch_dims, self.n_agents, -1)
             att_embedding = att_embedding.reshape(*batch_dims, self.n_agents, -1)
+        else:
+            embedding = embedding.squeeze(0)
+            att_embedding = att_embedding.squeeze(0)
 
         return embedding, att_embedding
 
@@ -489,6 +462,35 @@ class FlatlandTreeBase(Model):
             )
 
 
+class FlatlandTreeLSTMFeature(FlatlandTreeBase):
+    """Tree-based Flatland feature extractor.
+
+    This module consumes the native Flatland tree observation and writes a learned
+    feature tensor to ``self.out_key``. It does not produce policy logits or values,
+    and it does not apply action masking.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(tree_encoder_type="lstm", **kwargs)
+        output_dim = self.output_leaf_spec.shape[-1]
+        self.feature_head = nn.Sequential(
+            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
+            nn.GELU(),
+            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, output_dim),
+        )
+        self.to(self.device)
+
+    def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        embedding, att_embedding = self.encoder(tensordict)
+        features = self.feature_head(torch.cat([embedding, att_embedding], dim=-1))
+        if not self.output_has_agent_dim:
+            features = features.mean(dim=-2)
+        tensordict.set(self.out_key, features)
+        return tensordict
+
+
 class FlatlandTreeLSTMPolicy(FlatlandTreeBase):
     def __init__(self, **kwargs):
         super().__init__(tree_encoder_type="lstm", **kwargs)
@@ -637,6 +639,24 @@ class FlatlandTreeGNNCritic(FlatlandTreeBase):
             values = values.mean(-2)
         tensordict.set(self.out_key, values)
         return tensordict
+
+
+@dataclass
+class FlatlandTreeLSTMFeatureConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
+
+    @staticmethod
+    def associated_class():
+        return FlatlandTreeLSTMFeature
 
 
 @dataclass
