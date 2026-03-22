@@ -66,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
             "lstm_mlp",
             "gru",
             "gru_mlp",
+            "gnn",
+            "gnn_mlp",
             "treelstm",
             "treeltsm",
             "treelstm_gru",
@@ -93,9 +95,13 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _load_short_benchmark_module():
-    spec = importlib.util.spec_from_file_location("flatland_short_benchmark", SHORT_BENCHMARK_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "flatland_short_benchmark", SHORT_BENCHMARK_PATH
+    )
     if spec is None or spec.loader is None:
-        raise ImportError(f"Could not import short_benchmark module from {SHORT_BENCHMARK_PATH}")
+        raise ImportError(
+            f"Could not import short_benchmark module from {SHORT_BENCHMARK_PATH}"
+        )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -183,9 +189,7 @@ def main() -> None:
             f"--start-phase must be in [1, {len(phases)}], got {args.start_phase}"
         )
     if args.start_phase > 1 and initial_checkpoint is None:
-        raise ValueError(
-            "--initial-checkpoint is required when --start-phase > 1"
-        )
+        raise ValueError("--initial-checkpoint is required when --start-phase > 1")
 
     run_dir = _make_run_dir(args.run_name)
 
@@ -193,7 +197,9 @@ def main() -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "curriculum_yaml": str(curriculum_path),
         "model_name": model_name,
-        "initial_checkpoint": str(initial_checkpoint) if initial_checkpoint is not None else None,
+        "initial_checkpoint": str(initial_checkpoint)
+        if initial_checkpoint is not None
+        else None,
         "start_phase": args.start_phase,
         "phases_total": len(phases),
         "run_dir": str(run_dir),
@@ -226,7 +232,11 @@ def main() -> None:
         if not isinstance(exp_overrides, dict):
             raise ValueError(f"Phase {idx} field 'experiment' must be a mapping")
 
-        base_frames = _checkpoint_frames(current_checkpoint) if current_checkpoint is not None else 0
+        base_frames = (
+            _checkpoint_frames(current_checkpoint)
+            if current_checkpoint is not None
+            else 0
+        )
         target_frames = base_frames + phase_frames
 
         task = sb._build_task(model_name)
@@ -236,6 +246,8 @@ def main() -> None:
         algorithm_config = IppoConfig.get_from_yaml()
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
+        if hasattr(algorithm_config, "entropy_coef"):
+            algorithm_config.entropy_coef = 0.0005
         sb._apply_tree_algorithm_overrides(algorithm_config, model_name)
 
         experiment_config = sb._build_experiment_config(
@@ -309,7 +321,9 @@ def main() -> None:
         phase_record = {
             "phase_index": idx,
             "phase_name": phase_name,
-            "input_checkpoint": str(current_checkpoint) if current_checkpoint is not None else None,
+            "input_checkpoint": str(current_checkpoint)
+            if current_checkpoint is not None
+            else None,
             "output_folder": str(next_checkpoint.parent.parent),
             "output_checkpoint": str(next_checkpoint),
             "base_frames": base_frames,

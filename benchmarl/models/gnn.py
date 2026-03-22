@@ -391,6 +391,7 @@ def _get_edge_index(topology: str, self_loops: bool, n_agents: int, device: str)
         edge_index, _ = torch_geometric.utils.dense_to_sparse(adjacency)
         if not self_loops:
             edge_index, _ = torch_geometric.utils.remove_self_loops(edge_index)
+        edge_index = edge_index.to(device)
     elif topology == "empty":
         if self_loops:
             edge_index = (
@@ -427,7 +428,9 @@ def _batch_from_dense_to_ptg(
     b = torch.arange(batch_size, device=x.device)
 
     graphs = torch_geometric.data.Batch()
-    graphs.ptr = torch.arange(0, (batch_size + 1) * n_agents, n_agents)
+    graphs.ptr = torch.arange(
+        0, (batch_size + 1) * n_agents, n_agents, device=x.device
+    )
     graphs.batch = torch.repeat_interleave(b, n_agents)
     graphs.x = x
     graphs.pos = pos
@@ -435,6 +438,7 @@ def _batch_from_dense_to_ptg(
     graphs.edge_attr = None
 
     if edge_index is not None:
+        edge_index = edge_index.to(x.device)
         n_edges = edge_index.shape[1]
         # Tensor of shape [batch_size * n_edges]
         # in which edges corresponding to the same graph have the same index.

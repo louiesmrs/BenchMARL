@@ -46,6 +46,7 @@ from benchmarl.models import (
     FlatlandTreeLSTMPolicyConfig,
     FlatlandTreeTransformerCriticConfig,
     FlatlandTreeTransformerPolicyConfig,
+    GnnConfig,
     GruConfig,
     LstmConfig,
     MlpConfig,
@@ -230,6 +231,8 @@ def _parse_args() -> argparse.Namespace:
             "lstm_mlp",
             "gru",
             "gru_mlp",
+            "gnn",
+            "gnn_mlp",
             "treelstm",
             "treeltsm",
             "treelstm_gru",
@@ -252,6 +255,7 @@ def _normalize_model_name(model_name: str) -> str:
         "treeltsm": "treelstm",
         "lstm": "lstm_mlp",
         "gru": "gru_mlp",
+        "gnn": "gnn_mlp",
     }
     return aliases.get(model_name, model_name)
 
@@ -419,7 +423,7 @@ def _build_experiment_config(
 
     _apply_tree_experiment_overrides(config, model_name)
 
-    if model_name != "mlp" and model_name != "lstm_mlp" and model_name != "gru_mlp":
+    if model_name not in {"mlp", "lstm_mlp", "gru_mlp", "gnn_mlp"}:
         config.disable_value_estimator_vmap = True
 
     algo_save_folder = run_dir / algorithm_name
@@ -563,7 +567,7 @@ def _build_mlp_task():
 
 
 def _build_task(model_name: str):
-    if model_name in {"mlp", "lstm_mlp", "gru_mlp"}:
+    if model_name in {"mlp", "lstm_mlp", "gru_mlp", "gnn_mlp"}:
         return _build_mlp_task()
     return _build_tree_task()
 
@@ -582,6 +586,47 @@ def _build_model_configs(model_name: str):
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
         )
+    if model_name == "gnn_mlp":
+        try:
+            import torch_geometric
+        except ImportError as err:
+            raise ImportError(
+                "gnn_mlp requires torch_geometric to be installed."
+            ) from err
+
+        gnn_actor = GnnConfig.get_from_yaml(str(model_root / "gnn.yaml"))
+        gnn_actor.topology = "full"
+        gnn_actor.self_loops = True
+        gnn_actor.gnn_class = torch_geometric.nn.conv.GATv2Conv
+        gnn_actor.gnn_kwargs = {
+            "aggr": "mean",
+            "add_self_loops": False,
+        }
+
+        gnn_critic = GnnConfig.get_from_yaml(str(model_root / "gnn.yaml"))
+        gnn_critic.topology = "full"
+        gnn_critic.self_loops = True
+        gnn_critic.gnn_class = torch_geometric.nn.conv.GATv2Conv
+        gnn_critic.gnn_kwargs = {
+            "aggr": "mean",
+            "add_self_loops": False,
+        }
+
+        model_config = SequenceModelConfig(
+            model_configs=[
+                gnn_actor,
+                MlpConfig.get_from_yaml(str(model_root / "mlp.yaml")),
+            ],
+            intermediate_sizes=[128],
+        )
+        critic_model_config = SequenceModelConfig(
+            model_configs=[
+                gnn_critic,
+                MlpConfig.get_from_yaml(str(model_root / "mlp.yaml")),
+            ],
+            intermediate_sizes=[128],
+        )
+        return model_config, critic_model_config
     if model_name == "treelstm":
         model_config = FlatlandTreeLSTMPolicyConfig.get_from_yaml(
             str(model_root / "flatland_treelstm.yaml")
@@ -673,6 +718,8 @@ def main() -> None:
     for algorithm_config in algorithm_configs:
         if hasattr(algorithm_config, "minibatch_advantage"):
             algorithm_config.minibatch_advantage = True
+        if hasattr(algorithm_config, "entropy_coef"):
+            algorithm_config.entropy_coef = 0.0005
         _apply_tree_algorithm_overrides(algorithm_config, model_name)
 
     experiment_configs_by_algorithm: dict[str, ExperimentConfig] = {}

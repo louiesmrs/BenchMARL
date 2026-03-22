@@ -5,6 +5,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
@@ -27,10 +28,10 @@ def _load_eval_results_symbols():
         raise ImportError(f"Could not load eval_results module from {eval_results_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.Plotting, module.load_and_merge_json_dicts
+    return module.Plotting
 
 
-Plotting, load_and_merge_json_dicts = _load_eval_results_symbols()
+Plotting = _load_eval_results_symbols()
 
 DEFAULT_METRICS = ("return", "arrival_ratio", "deadlock_ratio")
 HIGHER_IS_BETTER = {
@@ -78,6 +79,25 @@ def _parse_args() -> argparse.Namespace:
         "--include-incomplete",
         action="store_true",
         help="Include incomplete runs instead of excluding them by default.",
+    )
+    parser.add_argument(
+        "--algorithm-label-source",
+        choices=["folder", "json"],
+        default="folder",
+        help=(
+            "How to name algorithms when merging JSONs. "
+            "'folder' uses the top-level subfolder under --input-dir (e.g. ippo, ippo2), "
+            "which avoids overwriting when multiple runs use the same json algorithm key."
+        ),
+    )
+    parser.add_argument(
+        "--normalize-step-keys",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Normalize per-run step_* keys to step_0..step_N based on numeric order. "
+            "This is useful for curriculum/resume runs where one phase may emit step_7..step_13."
+        ),
     )
     return parser.parse_args()
 
@@ -129,7 +149,24 @@ def _find_json_files(input_dir: Path, output_dir: Path) -> List[Path]:
 
 
 def _extract_step_keys(run_data: Dict) -> Tuple[str, ...]:
-    return tuple(sorted(key for key in run_data.keys() if key.startswith("step_")))
+    return tuple(
+        key
+        for key, _ in sorted(
+            (
+                (key, value)
+                for key, value in run_data.items()
+                if key.startswith("step_") and isinstance(value, dict)
+            ),
+            key=lambda item: _step_sort_key(item[0]),
+        )
+    )
+
+
+def _step_sort_key(step_key: str) -> tuple[int, str]:
+    match = re.match(r"^step_(\d+)$", step_key)
+    if match:
+        return (int(match.group(1)), step_key)
+    return (10**12, step_key)
 
 
 
@@ -144,32 +181,166 @@ def _get_single_run_payload(data: Dict) -> Tuple[str, Tuple[str, ...]]:
 
 
 
-def _filter_incomplete_json_files(json_files: List[Path]) -> List[str]:
+def _filter_incomplete_json_files(json_files: List[Path]) -> List[Path]:
     if not json_files:
         return []
 
     step_sets: Dict[Path, Tuple[str, ...]] = {}
+    normalized_signatures: Dict[Path, Tuple[str, ...]] = {}
     for path in json_files:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         _, step_keys = _get_single_run_payload(data)
         step_sets[path] = step_keys
+        normalized_signatures[path] = tuple(
+            f"step_{idx}" for idx, _ in enumerate(step_keys)
+        )
 
     reference_steps = max(step_sets.values(), key=lambda steps: (len(steps), steps))
-    filtered = []
+    reference_signature = tuple(f"step_{idx}" for idx, _ in enumerate(reference_steps))
+    filtered: List[Path] = []
     excluded = []
     for path, step_keys in step_sets.items():
-        if step_keys == reference_steps:
-            filtered.append(str(path))
+        if normalized_signatures[path] == reference_signature:
+            filtered.append(path)
         else:
-            excluded.append((path, len(step_keys), len(reference_steps)))
+            observed_first = step_keys[0] if step_keys else "<none>"
+            observed_last = step_keys[-1] if step_keys else "<none>"
+            expected_first = reference_steps[0] if reference_steps else "<none>"
+            expected_last = reference_steps[-1] if reference_steps else "<none>"
+            excluded.append(
+                (
+                    path,
+                    len(step_keys),
+                    len(reference_steps),
+                    observed_first,
+                    observed_last,
+                    expected_first,
+                    expected_last,
+                )
+            )
 
     if excluded:
         print("Excluding incomplete runs:")
-        for path, observed, expected in excluded:
-            print(f"  - {path} (steps={observed}, expected={expected})")
+        for (
+            path,
+            observed,
+            expected,
+            observed_first,
+            observed_last,
+            expected_first,
+            expected_last,
+        ) in excluded:
+            print(
+                f"  - {path} (steps={observed}, expected={expected}, "
+                f"observed_range={observed_first}..{observed_last}, "
+                f"expected_range={expected_first}..{expected_last})"
+            )
 
     return filtered
+
+
+def _algo_alias_from_path(path: Path, input_dir: Path) -> str | None:
+    rel = path.resolve().relative_to(input_dir.resolve())
+    if not rel.parts:
+        return None
+    alias = rel.parts[0]
+    return alias if alias and alias not in {".", ".."} else None
+
+
+def _rename_single_algo_payload(data: Dict, algo_alias: str) -> Dict:
+    env = next(iter(data))
+    task = next(iter(data[env]))
+    algo_dict = data[env][task]
+    if not isinstance(algo_dict, dict) or len(algo_dict) != 1:
+        return data
+
+    old_algo = next(iter(algo_dict))
+    if old_algo == algo_alias:
+        return data
+
+    payload = copy.deepcopy(data)
+    payload[env][task][algo_alias] = payload[env][task].pop(old_algo)
+    return payload
+
+
+def _normalize_step_keys_payload(data: Dict) -> Dict:
+    payload = copy.deepcopy(data)
+
+    for env_data in payload.values():
+        if not isinstance(env_data, dict):
+            continue
+        for task_data in env_data.values():
+            if not isinstance(task_data, dict):
+                continue
+            for algo_data in task_data.values():
+                if not isinstance(algo_data, dict):
+                    continue
+                for seed, run_data in list(algo_data.items()):
+                    if not isinstance(run_data, dict):
+                        continue
+
+                    step_items = [
+                        (k, v)
+                        for k, v in run_data.items()
+                        if k.startswith("step_") and isinstance(v, dict)
+                    ]
+                    if not step_items:
+                        continue
+
+                    step_items.sort(key=lambda item: _step_sort_key(item[0]))
+                    non_step_items = [
+                        (k, v)
+                        for k, v in run_data.items()
+                        if not (k.startswith("step_") and isinstance(v, dict))
+                    ]
+
+                    normalized_run: Dict = {}
+                    for k, v in non_step_items:
+                        normalized_run[k] = v
+                    for idx, (_, step_payload) in enumerate(step_items):
+                        normalized_run[f"step_{idx}"] = step_payload
+
+                    algo_data[seed] = normalized_run
+
+    return payload
+
+
+def _merge_json_dicts(
+    json_files: List[Path],
+    *,
+    input_dir: Path,
+    algorithm_label_source: str,
+    normalize_step_keys: bool,
+    json_output_file: Path,
+) -> Dict:
+    def update(d, u):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = update(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
+
+    merged: Dict = {}
+    for path in json_files:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if algorithm_label_source == "folder":
+            alias = _algo_alias_from_path(path, input_dir)
+            if alias is not None:
+                data = _rename_single_algo_payload(data, alias)
+
+        if normalize_step_keys:
+            data = _normalize_step_keys_payload(data)
+
+        update(merged, data)
+
+    with open(json_output_file, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=4)
+
+    return merged
 
 
 def _discover_step_metrics(node: Dict) -> Set[str]:
@@ -268,8 +439,8 @@ def main() -> None:
     if not discovered_json_files:
         raise FileNotFoundError(f"No marl-eval JSON files found under {input_dir}")
 
-    json_files = (
-        [str(path) for path in discovered_json_files]
+    json_files: List[Path] = (
+        discovered_json_files
         if args.include_incomplete
         else _filter_incomplete_json_files(discovered_json_files)
     )
@@ -279,7 +450,13 @@ def main() -> None:
         )
 
     merged_json = output_dir / "merged.json"
-    raw_data = load_and_merge_json_dicts(json_files, json_output_file=str(merged_json))
+    raw_data = _merge_json_dicts(
+        json_files,
+        input_dir=input_dir,
+        algorithm_label_source=args.algorithm_label_source,
+        normalize_step_keys=args.normalize_step_keys,
+        json_output_file=merged_json,
+    )
     print(f"Merged {len(json_files)} json files into {merged_json}")
 
     available_metrics = _discover_step_metrics(raw_data)

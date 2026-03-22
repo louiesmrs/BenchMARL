@@ -1,0 +1,240 @@
+phases:
+  - name: delay_0_departure_0
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.0
+        shortest_path_reward: 0
+        departure_reward: 0.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_departure_0_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.0
+        shortest_path_reward: 0
+        departure_reward: 0.1
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_departure_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.0
+        shortest_path_reward: 0
+        departure_reward: 1.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_departure_2
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.0
+        shortest_path_reward: 0
+        departure_reward: 2.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_1_departure_0
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.1
+        shortest_path_reward: 0
+        departure_reward: 0.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_1_departure_0_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.1
+        shortest_path_reward: 0
+        departure_reward: 0.1
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_1_departure_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.1
+        shortest_path_reward: 0
+        departure_reward: 1.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_0_1_departure_2
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 0.1
+        shortest_path_reward: 0
+        departure_reward: 2.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_1_departure_0
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 1.0
+        shortest_path_reward: 0
+        departure_reward: 0.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_1_departure_0_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 1.0
+        shortest_path_reward: 0
+        departure_reward: 0.1
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_1_departure_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 1.0
+        shortest_path_reward: 0
+        departure_reward: 1.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_1_departure_2
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 1.0
+        shortest_path_reward: 0
+        departure_reward: 2.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_2_departure_0
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 2.0
+        shortest_path_reward: 0
+        departure_reward: 0.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_2_departure_0_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 2.0
+        shortest_path_reward: 0
+        departure_reward: 0.1
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_2_departure_1
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 2.0
+        shortest_path_reward: 0
+        departure_reward: 1.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0
+
+  - name: delay_2_departure_2
+    total_timesteps: 2000000
+    task:
+      map_width: 30
+      map_height: 30
+      num_agents: 2
+      num_steps: 1000
+      reward_coefs:
+        arrival_reward: 5
+        delay_reward: 2.0
+        shortest_path_reward: 0
+        departure_reward: 2.0
+        deadlock_penalty: 2.5
+        arrival_delay_penalty: 0

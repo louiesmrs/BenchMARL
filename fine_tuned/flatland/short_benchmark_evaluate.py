@@ -119,6 +119,8 @@ def _infer_model_name(model_config: Any) -> str:
                     return "treelstm_gru"
                 if second.startswith("mlp"):
                     return "treelstm_mlp"
+            if first.startswith("gnn") and second.startswith("mlp"):
+                return "gnn_mlp"
 
     if name.startswith("lstm"):
         return "lstm_mlp"
