@@ -30,7 +30,7 @@ off_policy_init_random_frames: 0
 evaluation: true
 render: false
 evaluation_interval: 300_000
-evaluation_episodes: 20
+evaluation_episodes: 200
 evaluation_deterministic_actions: true
 evaluation_static: false
 

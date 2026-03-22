@@ -1,38 +1,40 @@
 experiment:
-  # Tree encoders are harder to optimize than flat MLP baselines.
-  # Use a gentler optimizer / clipping regime by default.
-  lr: 2.0e-05
-  clip_grad_val: 1.0
+  # Keep optimizer / clipping aligned with strong recurrent baselines.
+  # Tree policies still drift late; reduce PPO update intensity for stability.
+  lr: 5.0e-05
+  clip_grad_val: 5.0
+  on_policy_minibatch_size: 1200
 
 algorithm:
-  # Encourage exploration and reduce critic dominance for early tree-model stability.
+  # Match baseline PPO weighting so value learning is not underweighted.
   entropy_coef: 0.0005
-  critic_coef: 0.1
+  critic_coef: 1.0
 
 # Applies to direct tree policy/critic configs (treelstm, treetransformer, treegnn)
+# Keep cross-agent attention off by default (transformer_layers: 0) for stability.
 model:
-  hidden_size: 64
-  tree_embedding_size: 64
-  transformer_layers: 1
-  transformer_heads: 2
+  hidden_size: 128
+  tree_embedding_size: 128
+  transformer_layers: 0
+  transformer_heads: 4
   transformer_ff_mult: 2
-  gnn_layers: 1
-  gnn_heads: 2
+  gnn_layers: 2
+  gnn_heads: 4
 
 critic_model:
-  hidden_size: 64
-  tree_embedding_size: 64
-  transformer_layers: 1
-  transformer_heads: 2
+  hidden_size: 128
+  tree_embedding_size: 128
+  transformer_layers: 0
+  transformer_heads: 4
   transformer_ff_mult: 2
-  gnn_layers: 1
-  gnn_heads: 2
+  gnn_layers: 2
+  gnn_heads: 4
 
 # Applies to non-tree second stage when using sequence hybrids.
 sequence_recurrent_model:
-  hidden_size: 64
+  hidden_size: 128
   n_layers: 1
-  mlp_num_cells: [128, 128]
+  mlp_num_cells: [256, 256]
 
 sequence_mlp_model:
-  num_cells: [128, 128]
+  num_cells: [256, 256]

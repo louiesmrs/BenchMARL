@@ -21,11 +21,13 @@ class AgentAttentionBlock(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim * ff_mult, embed_dim),
         )
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         att_out, _ = self.attn(x, x, x)
-        x = self.att_mlp(torch.cat([x, att_out], dim=-1))
-        x = self.ff(x)
+        x = self.norm1(x + self.att_mlp(torch.cat([x, att_out], dim=-1)))
+        x = self.norm2(x + self.ff(x))
         return x
 
 

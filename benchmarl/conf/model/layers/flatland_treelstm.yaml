@@ -7,5 +7,5 @@ agent_attr_size: 83
 node_attr_size: 12
 num_actions: 5
 transformer_heads: 4
-transformer_layers: 3
+transformer_layers: 0
 transformer_ff_mult: 2

@@ -165,6 +165,58 @@ class FlatlandMlpBenchmarkTransform(Transform):
         return observation_spec
 
 
+class FlatlandTreeHybridObservationTransform(Transform):
+    def __init__(
+        self,
+        agent_group: str = AGENT_GROUP,
+        obs_keys: Sequence[str] = OBS_KEYS,
+    ) -> None:
+        super().__init__()
+        self.agent_group = agent_group
+        self.obs_keys = tuple(obs_keys)
+
+    def _reset(
+        self, tensordict: TensorDictBase, tensordict_reset: TensorDictBase
+    ) -> TensorDictBase:
+        return self._call(tensordict_reset)
+
+    def _call(self, tensordict: TensorDictBase) -> TensorDictBase:
+        obs_prefix = (self.agent_group, "observation")
+        flat_observation = torch.cat(
+            [
+                tensordict.get((*obs_prefix, key)).to(torch.float32)
+                for key in self.obs_keys
+            ],
+            dim=-1,
+        )
+        tensordict.set((*obs_prefix, "flat_observation"), flat_observation)
+        return tensordict
+
+    def transform_observation_spec(self, observation_spec):
+        if not isinstance(observation_spec, Composite):
+            return observation_spec
+        if self.agent_group not in observation_spec.keys():
+            return observation_spec
+
+        group_spec = observation_spec[self.agent_group]
+        if "observation" not in group_spec.keys():
+            return observation_spec
+
+        obs_spec = group_spec["observation"]
+        if any(key not in obs_spec.keys() for key in self.obs_keys):
+            return observation_spec
+
+        agent_shape_len = len(obs_spec.shape)
+        flat_dim = sum(
+            int(prod(obs_spec[key].shape[agent_shape_len:])) for key in self.obs_keys
+        )
+        obs_spec["flat_observation"] = UnboundedContinuous(
+            shape=(*obs_spec.shape, flat_dim),
+            dtype=torch.float32,
+        )
+        return observation_spec
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a short Flatland benchmark for a selected model family."
@@ -432,6 +484,9 @@ def _build_tree_task():
     def get_env_transforms(self, env: EnvBase):
         transforms = list(base_get_env_transforms(env))
         transforms.append(FlatlandTreeActionMaskTransform(agent_group=AGENT_GROUP))
+        transforms.append(
+            FlatlandTreeHybridObservationTransform(agent_group=AGENT_GROUP)
+        )
         return transforms
 
     def action_mask_spec(self, env: EnvBase) -> Composite | None:

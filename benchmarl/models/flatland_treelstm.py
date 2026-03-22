@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import warnings
 from dataclasses import dataclass, MISSING
 from typing import Optional
 
@@ -384,7 +385,70 @@ class FlatlandTreeBase(Model):
             gnn_use_edge_attr=self.gnn_use_edge_attr,
         )
 
+        self.flat_observation_key = (
+            self.agent_group,
+            "observation",
+            "flat_observation",
+        )
+        self.has_flat_observation = (
+            self.flat_observation_key in self.input_spec.keys(True, True)
+        )
+
+        self.pre_head_norm = nn.LayerNorm(self.head_input_dim)
+        if self.has_flat_observation:
+            flat_dim = self.input_spec[self.flat_observation_key].shape[-1]
+            self.flat_projection = nn.Sequential(
+                nn.Linear(flat_dim, self.head_input_dim),
+                nn.GELU(),
+                nn.LayerNorm(self.head_input_dim),
+            )
+            self.flat_fusion_gate = nn.Linear(2 * self.head_input_dim, self.head_input_dim)
+        else:
+            self.flat_projection = None
+            self.flat_fusion_gate = None
+
+        self._warned_low_variance: set[str] = set()
+
         self.to(self.device)
+
+    def _build_head_input(
+        self,
+        tensordict: TensorDictBase,
+        embedding: torch.Tensor,
+        att_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        head_input = torch.cat([embedding, att_embedding], dim=-1)
+
+        if self.has_flat_observation:
+            flat_observation = tensordict.get(self.flat_observation_key, None)
+            if flat_observation is not None:
+                flat_observation = flat_observation.to(head_input.dtype)
+                flat_features = self.flat_projection(flat_observation)
+                gate = torch.sigmoid(
+                    self.flat_fusion_gate(torch.cat([head_input, flat_features], dim=-1))
+                )
+                head_input = gate * head_input + (1.0 - gate) * flat_features
+
+        return self.pre_head_norm(head_input)
+
+    def _diagnose_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        if not torch.isfinite(tensor).all():
+            raise RuntimeError(f"{self.__class__.__name__} produced non-finite {name}.")
+
+        if name in self._warned_low_variance or tensor.shape[-1] <= 1:
+            return
+
+        with torch.no_grad():
+            flat = tensor.reshape(-1, tensor.shape[-1])
+            if flat.shape[0] <= 1:
+                return
+            dim_std = flat.std(dim=0).mean()
+            if torch.isfinite(dim_std) and dim_std.item() < 1e-4:
+                warnings.warn(
+                    f"{self.__class__.__name__} low-variance {name}: "
+                    f"mean per-dim std={dim_std.item():.3e}."
+                )
+                self._warned_low_variance.add(name)
 
     def _perform_checks(self):
         super()._perform_checks()
@@ -473,18 +537,23 @@ class FlatlandTreeLSTMFeature(FlatlandTreeBase):
     def __init__(self, **kwargs):
         super().__init__(tree_encoder_type="lstm", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
+
         self.feature_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.feature_skip = nn.Linear(self.head_input_dim, output_dim)
+
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        features = self.feature_head(torch.cat([embedding, att_embedding], dim=-1))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        features = self.feature_head(head_input) + self.feature_skip(head_input)
+
+        self._diagnose_tensor("features", features)
+
         if not self.output_has_agent_dim:
             features = features.mean(dim=-2)
         tensordict.set(self.out_key, features)
@@ -500,21 +569,18 @@ class FlatlandTreeLSTMPolicy(FlatlandTreeBase):
                 f"Policy output dim {output_dim} does not match num_actions {self.num_actions}"
             )
         self.policy_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.policy_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        logits = self.policy_head(torch.cat([embedding, att_embedding], dim=-1))
-        valid_actions = tensordict.get(
-            (self.agent_group, "observation", "valid_actions")
-        )
-        logits = logits.masked_fill(~valid_actions, float("-inf"))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        logits = self.policy_head(head_input) + self.policy_skip(head_input)
+        self._diagnose_tensor("logits", logits)
         tensordict.set(self.out_key, logits)
         return tensordict
 
@@ -528,21 +594,18 @@ class FlatlandTreeTransformerPolicy(FlatlandTreeBase):
                 f"Policy output dim {output_dim} does not match num_actions {self.num_actions}"
             )
         self.policy_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.policy_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        logits = self.policy_head(torch.cat([embedding, att_embedding], dim=-1))
-        valid_actions = tensordict.get(
-            (self.agent_group, "observation", "valid_actions")
-        )
-        logits = logits.masked_fill(~valid_actions, float("-inf"))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        logits = self.policy_head(head_input) + self.policy_skip(head_input)
+        self._diagnose_tensor("logits", logits)
         tensordict.set(self.out_key, logits)
         return tensordict
 
@@ -556,21 +619,18 @@ class FlatlandTreeGNNPolicy(FlatlandTreeBase):
                 f"Policy output dim {output_dim} does not match num_actions {self.num_actions}"
             )
         self.policy_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.policy_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        logits = self.policy_head(torch.cat([embedding, att_embedding], dim=-1))
-        valid_actions = tensordict.get(
-            (self.agent_group, "observation", "valid_actions")
-        )
-        logits = logits.masked_fill(~valid_actions, float("-inf"))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        logits = self.policy_head(head_input) + self.policy_skip(head_input)
+        self._diagnose_tensor("logits", logits)
         tensordict.set(self.out_key, logits)
         return tensordict
 
@@ -580,17 +640,18 @@ class FlatlandTreeLSTMCritic(FlatlandTreeBase):
         super().__init__(tree_encoder_type="lstm", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
         self.value_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.value_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        values = self.value_head(torch.cat([embedding, att_embedding], dim=-1))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        values = self.value_head(head_input) + self.value_skip(head_input)
+        self._diagnose_tensor("values", values)
         if not self.output_has_agent_dim:
             values = values.mean(-2)
         tensordict.set(self.out_key, values)
@@ -602,17 +663,18 @@ class FlatlandTreeTransformerCritic(FlatlandTreeBase):
         super().__init__(tree_encoder_type="transformer", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
         self.value_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.value_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        values = self.value_head(torch.cat([embedding, att_embedding], dim=-1))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        values = self.value_head(head_input) + self.value_skip(head_input)
+        self._diagnose_tensor("values", values)
         if not self.output_has_agent_dim:
             values = values.mean(-2)
         tensordict.set(self.out_key, values)
@@ -624,17 +686,18 @@ class FlatlandTreeGNNCritic(FlatlandTreeBase):
         super().__init__(tree_encoder_type="gnn", **kwargs)
         output_dim = self.output_leaf_spec.shape[-1]
         self.value_head = nn.Sequential(
-            nn.Linear(self.head_input_dim, 2 * self.hidden_size),
-            nn.GELU(),
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(self.head_input_dim, self.hidden_size),
             nn.GELU(),
             nn.Linear(self.hidden_size, output_dim),
         )
+        self.value_skip = nn.Linear(self.head_input_dim, output_dim)
         self.to(self.device)
 
     def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
         embedding, att_embedding = self.encoder(tensordict)
-        values = self.value_head(torch.cat([embedding, att_embedding], dim=-1))
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        values = self.value_head(head_input) + self.value_skip(head_input)
+        self._diagnose_tensor("values", values)
         if not self.output_has_agent_dim:
             values = values.mean(-2)
         tensordict.set(self.out_key, values)
