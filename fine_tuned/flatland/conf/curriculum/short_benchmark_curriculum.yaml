@@ -1,11 +1,11 @@
 phases:
   - name: delay_1_departure_0
-    total_timesteps: 2000000
+    total_timesteps: 3000000
     task:
       map_width: 30
       map_height: 30
-      num_agents: 2
-      num_steps: 1000
+      num_agents: 10
+      num_steps: 200
       reward_coefs:
         arrival_reward: 5
         delay_reward: 1.0
@@ -15,12 +15,12 @@ phases:
         arrival_delay_penalty: 0
 
   - name: delay_0_departure_1
-    total_timesteps: 2000000
+    total_timesteps: 3000000
     task:
       map_width: 30
       map_height: 30
-      num_agents: 2
-      num_steps: 1000
+      num_agents: 10
+      num_steps: 200
       reward_coefs:
         arrival_reward: 5
         delay_reward: 0.0
@@ -41,5 +41,5 @@ phases:
 #        delay_reward: 1.0
 #        shortest_path_reward: 0
 #        departure_reward: 0.1
-#        deadlock_penalty: 2.5
+#        deadlock_penalty: 5
 #        arrival_delay_penalty: 0
