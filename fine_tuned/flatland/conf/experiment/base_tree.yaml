@@ -1,14 +1,12 @@
 experiment:
   # Keep optimizer / clipping aligned with strong recurrent baselines.
   # Tree policies still drift late; reduce PPO update intensity for stability.
-  lr: 5.0e-05
-  clip_grad_val: 5.0
-  on_policy_minibatch_size: 1200
+  on_policy_minibatch_size: 600
+  on_policy_collected_frames_per_batch: 12000
 
 algorithm:
   # Match baseline PPO weighting so value learning is not underweighted.
   entropy_coef: 0.0005
-  critic_coef: 1.0
 
 # Applies to direct tree policy/critic configs (treelstm, treetransformer, treegnn)
 # Keep cross-agent attention off by default (transformer_layers: 0) for stability.
