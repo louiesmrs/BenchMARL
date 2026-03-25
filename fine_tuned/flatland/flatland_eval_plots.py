@@ -99,6 +99,15 @@ def _parse_args() -> argparse.Namespace:
             "This is useful for curriculum/resume runs where one phase may emit step_7..step_13."
         ),
     )
+    parser.add_argument(
+        "--truncate-to-shortest",
+        action="store_true",
+        help=(
+            "Include all discovered runs and truncate each run to the shortest common "
+            "number of step_* entries before plotting. Useful for curriculum runs where "
+            "phase 1 has one extra initial eval point."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -306,12 +315,73 @@ def _normalize_step_keys_payload(data: Dict) -> Dict:
     return payload
 
 
+def _iter_run_dicts(payload: Dict) -> Iterable[Dict]:
+    for env_data in payload.values():
+        if not isinstance(env_data, dict):
+            continue
+        for task_data in env_data.values():
+            if not isinstance(task_data, dict):
+                continue
+            for algo_data in task_data.values():
+                if not isinstance(algo_data, dict):
+                    continue
+                for run_data in algo_data.values():
+                    if isinstance(run_data, dict):
+                        yield run_data
+
+
+def _step_count_in_payload(payload: Dict) -> int:
+    counts = []
+    for run_data in _iter_run_dicts(payload):
+        step_count = len(
+            [
+                k
+                for k, v in run_data.items()
+                if k.startswith("step_") and isinstance(v, dict)
+            ]
+        )
+        if step_count:
+            counts.append(step_count)
+    return min(counts) if counts else 0
+
+
+def _truncate_step_keys_payload(payload: Dict, keep_steps: int) -> Dict:
+    truncated = copy.deepcopy(payload)
+    if keep_steps <= 0:
+        return truncated
+
+    for run_data in _iter_run_dicts(truncated):
+        step_items = [
+            (k, v)
+            for k, v in run_data.items()
+            if k.startswith("step_") and isinstance(v, dict)
+        ]
+        if not step_items:
+            continue
+
+        step_items.sort(key=lambda item: _step_sort_key(item[0]))
+        non_step_items = [
+            (k, v)
+            for k, v in run_data.items()
+            if not (k.startswith("step_") and isinstance(v, dict))
+        ]
+
+        run_data.clear()
+        for k, v in non_step_items:
+            run_data[k] = v
+        for idx, (_, step_payload) in enumerate(step_items[:keep_steps]):
+            run_data[f"step_{idx}"] = step_payload
+
+    return truncated
+
+
 def _merge_json_dicts(
     json_files: List[Path],
     *,
     input_dir: Path,
     algorithm_label_source: str,
     normalize_step_keys: bool,
+    truncate_to_shortest: bool,
     json_output_file: Path,
 ) -> Dict:
     def update(d, u):
@@ -322,7 +392,7 @@ def _merge_json_dicts(
                 d[k] = v
         return d
 
-    merged: Dict = {}
+    prepared_payloads: List[Dict] = []
     for path in json_files:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -335,6 +405,22 @@ def _merge_json_dicts(
         if normalize_step_keys:
             data = _normalize_step_keys_payload(data)
 
+        prepared_payloads.append(data)
+
+    if truncate_to_shortest and prepared_payloads:
+        min_steps = min(_step_count_in_payload(payload) for payload in prepared_payloads)
+        if min_steps <= 0:
+            raise ValueError(
+                "--truncate-to-shortest was requested but no step_* entries were found."
+            )
+        print(f"Truncating all runs to shortest common step count: {min_steps}")
+        prepared_payloads = [
+            _truncate_step_keys_payload(payload, min_steps)
+            for payload in prepared_payloads
+        ]
+
+    merged: Dict = {}
+    for data in prepared_payloads:
         update(merged, data)
 
     with open(json_output_file, "w", encoding="utf-8") as f:
@@ -439,11 +525,18 @@ def main() -> None:
     if not discovered_json_files:
         raise FileNotFoundError(f"No marl-eval JSON files found under {input_dir}")
 
-    json_files: List[Path] = (
-        discovered_json_files
-        if args.include_incomplete
-        else _filter_incomplete_json_files(discovered_json_files)
-    )
+    if args.truncate_to_shortest:
+        json_files = discovered_json_files
+        print(
+            "Including all discovered runs and truncating to shortest common step count "
+            "(--truncate-to-shortest)."
+        )
+    else:
+        json_files = (
+            discovered_json_files
+            if args.include_incomplete
+            else _filter_incomplete_json_files(discovered_json_files)
+        )
     if not json_files:
         raise FileNotFoundError(
             f"No complete marl-eval JSON files remained after filtering under {input_dir}"
@@ -455,6 +548,7 @@ def main() -> None:
         input_dir=input_dir,
         algorithm_label_source=args.algorithm_label_source,
         normalize_step_keys=args.normalize_step_keys,
+        truncate_to_shortest=args.truncate_to_shortest,
         json_output_file=merged_json,
     )
     print(f"Merged {len(json_files)} json files into {merged_json}")

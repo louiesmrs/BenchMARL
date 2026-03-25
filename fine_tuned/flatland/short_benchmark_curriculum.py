@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,7 @@ sys.path.insert(0, str(BENCHMARL_ROOT))
 
 from benchmarl.algorithms import IppoConfig
 from benchmarl.benchmark import Benchmark
+from benchmarl.experiment import Experiment
 
 DEFAULT_CURRICULUM = (
     Path(__file__).resolve().parent
@@ -82,6 +84,16 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional label for output folder naming.",
+    )
+    parser.add_argument(
+        "--weights-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "If set, restores only model/loss weights from --initial-checkpoint and "
+            "resets replay buffer/collector state. Use this for transfer runs "
+            "(e.g. 2-agent checkpoint -> 10-agent curriculum)."
+        ),
     )
     return parser.parse_args()
 
@@ -164,6 +176,39 @@ def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
+def _load_weights_only_checkpoint(
+    experiment: "Experiment",
+    checkpoint_file: Path,
+    map_location: Any = None,
+) -> None:
+    loaded_dict = torch.load(str(checkpoint_file), map_location=map_location)
+
+    loaded_groups = []
+    for group in experiment.group_map.keys():
+        key = f"loss_{group}"
+        if key not in loaded_dict:
+            raise KeyError(
+                f"Weights-only restore could not find '{key}' in checkpoint {checkpoint_file}"
+            )
+        experiment.losses[group].load_state_dict(loaded_dict[key])
+        loaded_groups.append(group)
+
+    state = loaded_dict.get("state", {})
+    if "total_frames" in state:
+        experiment.total_frames = int(state["total_frames"])
+    if "n_iters_performed" in state:
+        experiment.n_iters_performed = int(state["n_iters_performed"])
+    if "mean_return" in state:
+        experiment.mean_return = state["mean_return"]
+
+    print(
+        "Weights-only restore complete: "
+        f"loaded groups={loaded_groups}, "
+        f"total_frames={experiment.total_frames}, "
+        f"n_iters={experiment.n_iters_performed}."
+    )
+
+
 def main() -> None:
     args = _parse_args()
     sb = _load_short_benchmark_module()
@@ -197,6 +242,7 @@ def main() -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "curriculum_yaml": str(curriculum_path),
         "model_name": model_name,
+        "weights_only": args.weights_only,
         "initial_checkpoint": str(initial_checkpoint)
         if initial_checkpoint is not None
         else None,
@@ -256,7 +302,9 @@ def main() -> None:
             algorithm_name="ippo",
         )
         experiment_config.restore_file = (
-            str(current_checkpoint) if current_checkpoint is not None else None
+            str(current_checkpoint)
+            if (current_checkpoint is not None and not args.weights_only)
+            else None
         )
         experiment_config.max_n_frames = target_frames
         experiment_config.evaluation_only = False
@@ -286,6 +334,8 @@ def main() -> None:
             if current_checkpoint is not None
             else "Start checkpoint: <fresh start>"
         )
+        if args.weights_only and current_checkpoint is not None:
+            print("Restore mode: weights-only (buffer/collector reset)")
         print(f"Frames: base={base_frames}, add={phase_frames}, target={target_frames}")
         print(
             "Checkpoint interval: "
@@ -304,15 +354,31 @@ def main() -> None:
             seed=0,
         )
 
-        benchmark = Benchmark(
-            algorithm_configs=[algorithm_config],
-            model_config=model_config,
-            critic_model_config=critic_model_config,
-            tasks=[task],
-            seeds={0},
-            experiment_config=experiment_config,
-        )
-        benchmark.run_sequential()
+        if args.weights_only and current_checkpoint is not None:
+            experiment = Experiment(
+                task=task,
+                algorithm_config=algorithm_config,
+                model_config=model_config,
+                critic_model_config=critic_model_config,
+                seed=0,
+                config=experiment_config,
+            )
+            _load_weights_only_checkpoint(
+                experiment,
+                current_checkpoint,
+                map_location=experiment_config.restore_map_location,
+            )
+            experiment.run()
+        else:
+            benchmark = Benchmark(
+                algorithm_configs=[algorithm_config],
+                model_config=model_config,
+                critic_model_config=critic_model_config,
+                tasks=[task],
+                seeds={0},
+                experiment_config=experiment_config,
+            )
+            benchmark.run_sequential()
 
         next_checkpoint = _latest_checkpoint_recursive(phase_dir)
         if next_checkpoint is None:
