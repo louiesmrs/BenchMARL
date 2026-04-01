@@ -1,8 +1,3 @@
-metadata:
-  source_hparams: fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_02__delay_0_departure_1/ippo/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/texts/hparams0.txt
-  run_name: 2026-03-31_08-06-33__curriculum
-  phase: phase_02__delay_0_departure_1
-
 environment_name: flatland
 continuous_actions: false
 on_policy: true
@@ -53,8 +48,6 @@ experiment:
   project_name: benchmarl
   wandb_extra_kwargs: {}
   create_json: true
-  save_folder: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_02__delay_0_departure_1/ippo
-  restore_file: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_01__delay_1_departure_0/ippo/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/checkpoints/checkpoint_3840000.pt
   restore_map_location: null
   checkpoint_interval: 2016000
   checkpoint_at_end: true
