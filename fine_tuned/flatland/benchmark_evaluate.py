@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
@@ -173,6 +174,30 @@ def _checkpoint_frame_count(checkpoint_file: Path) -> int:
     return int(m.group(1))
 
 
+def _resolve_runtime_train_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _resolve_device_value(value: Any, train_device: str, *, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, torch.device):
+        return value.type
+
+    text = str(value)
+    if text in {"auto", "train_device"}:
+        return train_device
+    if text.startswith("cuda") and not torch.cuda.is_available():
+        return train_device
+    if text.startswith("mps") and not torch.backends.mps.is_available():
+        return "cpu"
+    return text
+
+
 def _find_eval_json(run_save_folder: Path, experiment_name: str) -> Path:
     expected = run_save_folder / experiment_name / f"{experiment_name}.json"
     if expected.exists():
@@ -287,6 +312,26 @@ def main() -> None:
     experiment_config.restore_file = str(checkpoint_file)
     experiment_config.evaluation_only = True
     experiment_config.max_n_frames = _checkpoint_frame_count(checkpoint_file)
+
+    runtime_train_device = _resolve_runtime_train_device()
+    experiment_config.train_device = _resolve_device_value(
+        getattr(experiment_config, "train_device", None),
+        runtime_train_device,
+        default=runtime_train_device,
+    )
+    experiment_config.buffer_device = _resolve_device_value(
+        getattr(experiment_config, "buffer_device", None),
+        experiment_config.train_device,
+        default=experiment_config.train_device,
+    )
+    experiment_config.sampling_device = _resolve_device_value(
+        getattr(experiment_config, "sampling_device", None),
+        experiment_config.train_device,
+        default="cpu",
+    )
+    if getattr(experiment_config, "restore_map_location", None) is None:
+        experiment_config.restore_map_location = experiment_config.train_device
+
     if args.evaluation_episodes is not None:
         experiment_config.evaluation_episodes = args.evaluation_episodes
     if args.render is not None:
@@ -296,6 +341,13 @@ def main() -> None:
     checkpoint_experiment_name = checkpoint_file.parent.parent.name
 
     print("\nEvaluating with benchmark wiring\n")
+    print(
+        "Resolved devices for evaluation: "
+        f"sampling={experiment_config.sampling_device}, "
+        f"train={experiment_config.train_device}, "
+        f"buffer={experiment_config.buffer_device}, "
+        f"restore_map_location={experiment_config.restore_map_location}"
+    )
     sb._print_hydra_config(
         experiment_config=experiment_config,
         algorithm_config=algorithm_config,

@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import copy
 import importlib.util
 import json
+import pickle
+import platform
 import re
+import statistics
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 import matplotlib
 
@@ -106,6 +110,42 @@ def _parse_args() -> argparse.Namespace:
             "Include all discovered runs and truncate each run to the shortest common "
             "number of step_* entries before plotting. Useful for curriculum runs where "
             "phase 1 has one extra initial eval point."
+        ),
+    )
+    parser.add_argument(
+        "--plot-training-efficiency",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Generate an additional training-efficiency graph based on "
+            "seconds_per_million_frames = (collection+training wall seconds) / (frames/1e6)."
+        ),
+    )
+    parser.add_argument(
+        "--efficiency-baseline-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV with baseline_seconds_per_million_frames. Supported columns: "
+            "machine_id, task_signature, baseline_seconds_per_million_frames. "
+            "Use '*' in machine_id/task_signature as wildcard."
+        ),
+    )
+    parser.add_argument(
+        "--efficiency-global-baseline",
+        type=float,
+        default=None,
+        help=(
+            "Optional global baseline seconds_per_million_frames used when no machine/task baseline is found."
+        ),
+    )
+    parser.add_argument(
+        "--machine-id",
+        type=str,
+        default=None,
+        help=(
+            "Optional machine id override for training-efficiency normalization. "
+            "Defaults to host parsed from event files, else platform.node()."
         ),
     )
     return parser.parse_args()
@@ -446,6 +486,288 @@ def _save_current_figure(path: Path) -> None:
     print(f"Wrote {path}")
 
 
+def _safe_read_scalar_values(path: Path) -> list[float]:
+    if not path.exists():
+        return []
+    values: list[float] = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            try:
+                values.append(float(row[1]))
+            except ValueError:
+                continue
+    return values
+
+
+def _infer_machine_id(run_folder: Path, machine_override: str | None) -> str:
+    if machine_override:
+        return machine_override
+
+    event_files = sorted(run_folder.glob("events.out.tfevents.*"))
+    event_re = re.compile(r"^events\.out\.tfevents\.\d+\.(.+)\.\d+\.\d+$")
+    for event_file in event_files:
+        match = event_re.match(event_file.name)
+        if match:
+            return match.group(1)
+    return platform.node() or "unknown_machine"
+
+
+def _load_task_and_model_signature(config_pkl: Path) -> tuple[str, str]:
+    if not config_pkl.exists():
+        return "unknown_task", "unknown_model"
+
+    try:
+        with open(config_pkl, "rb") as f:
+            _task = pickle.load(f)
+            task_config = pickle.load(f)
+            _algorithm_config = pickle.load(f)
+            model_config = pickle.load(f)
+    except Exception:
+        return "unknown_task", "unknown_model"
+
+    model_name = type(model_config).__name__.lower()
+
+    if not isinstance(task_config, dict):
+        return "unknown_task", model_name
+
+    task_signature_payload = {
+        "map_width": task_config.get("map_width"),
+        "map_height": task_config.get("map_height"),
+        "num_agents": task_config.get("num_agents"),
+        "num_steps": task_config.get("num_steps"),
+        "reward_coefs": task_config.get("reward_coefs"),
+        "env_pickle": bool(task_config.get("env_pickle")),
+    }
+    task_signature = json.dumps(task_signature_payload, sort_keys=True, separators=(",", ":"))
+    return task_signature, model_name
+
+
+def _label_for_json(path: Path, input_dir: Path, algorithm_label_source: str) -> str:
+    if algorithm_label_source == "folder":
+        alias = _algo_alias_from_path(path, input_dir)
+        if alias:
+            return alias.upper()
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    env = next(iter(data))
+    task = next(iter(data[env]))
+    algo = next(iter(data[env][task]))
+    return str(algo).upper()
+
+
+def _collect_training_efficiency_records(
+    json_files: List[Path],
+    *,
+    input_dir: Path,
+    algorithm_label_source: str,
+    machine_id_override: str | None,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for json_path in json_files:
+        experiment_folder = json_path.parent
+        run_folder = experiment_folder / json_path.stem
+        scalars_folder = run_folder / "scalars"
+
+        collection_vals = _safe_read_scalar_values(
+            scalars_folder / "timers_collection_time.csv"
+        )
+        training_vals = _safe_read_scalar_values(
+            scalars_folder / "timers_training_time.csv"
+        )
+
+        if not collection_vals and not training_vals:
+            continue
+
+        wall_seconds = float(sum(collection_vals) + sum(training_vals))
+
+        total_frames_vals = _safe_read_scalar_values(
+            scalars_folder / "counters_total_frames.csv"
+        )
+        if total_frames_vals:
+            total_frames = float(total_frames_vals[-1])
+        else:
+            current_frames_vals = _safe_read_scalar_values(
+                scalars_folder / "counters_current_frames.csv"
+            )
+            total_frames = float(sum(current_frames_vals)) if current_frames_vals else 0.0
+
+        if total_frames <= 0:
+            continue
+
+        seconds_per_million_frames = wall_seconds / (total_frames / 1_000_000.0)
+        task_signature, model_name = _load_task_and_model_signature(
+            experiment_folder / "config.pkl"
+        )
+        machine_id = _infer_machine_id(run_folder, machine_id_override)
+        label = _label_for_json(json_path, input_dir, algorithm_label_source)
+
+        records.append(
+            {
+                "label": label,
+                "json_path": str(json_path),
+                "machine_id": machine_id,
+                "task_signature": task_signature,
+                "model_name": model_name,
+                "wall_clock_seconds": wall_seconds,
+                "total_frames": total_frames,
+                "seconds_per_million_frames": seconds_per_million_frames,
+            }
+        )
+
+    return records
+
+
+def _load_efficiency_baseline_map(path: Path | None) -> dict[tuple[str, str], float]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Efficiency baseline CSV not found: {path}")
+
+    mapping: dict[tuple[str, str], float] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            machine = (row.get("machine_id") or "*").strip() or "*"
+            task_sig = (row.get("task_signature") or "*").strip() or "*"
+            raw = (
+                row.get("baseline_seconds_per_million_frames")
+                or row.get("baseline_spm")
+            )
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except ValueError:
+                continue
+            if val > 0:
+                mapping[(machine, task_sig)] = val
+    return mapping
+
+
+def _resolve_baseline_for_record(
+    record: dict[str, Any],
+    *,
+    explicit_map: dict[tuple[str, str], float],
+    auto_map: dict[tuple[str, str], float],
+    global_baseline: float | None,
+) -> float | None:
+    machine = record["machine_id"]
+    task_sig = record["task_signature"]
+
+    for key in [(machine, task_sig), (machine, "*"), ("*", task_sig), ("*", "*")]:
+        if key in explicit_map:
+            return explicit_map[key]
+
+    if (machine, task_sig) in auto_map:
+        return auto_map[(machine, task_sig)]
+
+    if global_baseline is not None and global_baseline > 0:
+        return global_baseline
+    return None
+
+
+def _plot_training_efficiency(
+    records: list[dict[str, Any]],
+    *,
+    output_dir: Path,
+    explicit_baseline_map: dict[tuple[str, str], float],
+    global_baseline: float | None,
+) -> None:
+    if not records:
+        print("Skipping training efficiency plot: no timer/frame data found.")
+        return
+
+    auto_baseline_map: dict[tuple[str, str], float] = {}
+    grouped_mlp: dict[tuple[str, str], list[float]] = {}
+    for record in records:
+        if "mlp" not in str(record.get("model_name", "")).lower():
+            continue
+        key = (record["machine_id"], record["task_signature"])
+        grouped_mlp.setdefault(key, []).append(record["seconds_per_million_frames"])
+    for key, vals in grouped_mlp.items():
+        if vals:
+            auto_baseline_map[key] = float(statistics.median(vals))
+
+    for record in records:
+        baseline = _resolve_baseline_for_record(
+            record,
+            explicit_map=explicit_baseline_map,
+            auto_map=auto_baseline_map,
+            global_baseline=global_baseline,
+        )
+        record["baseline_seconds_per_million_frames"] = baseline
+        record["normalized_seconds_per_million_frames"] = (
+            record["seconds_per_million_frames"] / baseline
+            if baseline is not None and baseline > 0
+            else None
+        )
+
+    records_sorted = sorted(records, key=lambda r: r["label"])
+
+    csv_path = output_dir / "training_efficiency.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "label",
+                "machine_id",
+                "task_signature",
+                "model_name",
+                "total_frames",
+                "wall_clock_seconds",
+                "seconds_per_million_frames",
+                "baseline_seconds_per_million_frames",
+                "normalized_seconds_per_million_frames",
+                "json_path",
+            ],
+        )
+        writer.writeheader()
+        for record in records_sorted:
+            writer.writerow(record)
+    print(f"Wrote {csv_path}")
+
+    labels = [record["label"] for record in records_sorted]
+    spm_vals = [record["seconds_per_million_frames"] for record in records_sorted]
+
+    plt.close("all")
+    fig, ax = plt.subplots(figsize=(max(8, 0.8 * len(labels)), 4.8))
+    ax.bar(labels, spm_vals)
+    ax.set_ylabel("seconds per million frames (lower is better)")
+    ax.set_title("Training efficiency")
+    ax.tick_params(axis="x", rotation=30)
+    fig.tight_layout()
+    _save_current_figure(output_dir / "training_efficiency_seconds_per_million_frames.png")
+
+    normalized_pairs = [
+        (record["label"], record["normalized_seconds_per_million_frames"])
+        for record in records_sorted
+        if record["normalized_seconds_per_million_frames"] is not None
+    ]
+    if normalized_pairs:
+        n_labels = [x[0] for x in normalized_pairs]
+        n_vals = [x[1] for x in normalized_pairs]
+        plt.close("all")
+        fig, ax = plt.subplots(figsize=(max(8, 0.8 * len(n_labels)), 4.8))
+        ax.bar(n_labels, n_vals)
+        ax.axhline(1.0, linestyle="--", linewidth=1)
+        ax.set_ylabel("normalized seconds per million frames")
+        ax.set_title("Training efficiency normalized by machine/task baseline")
+        ax.tick_params(axis="x", rotation=30)
+        fig.tight_layout()
+        _save_current_figure(
+            output_dir / "training_efficiency_normalized_seconds_per_million_frames.png"
+        )
+    else:
+        print(
+            "Skipping normalized training-efficiency plot: "
+            "no matching baseline (explicit, auto MLP median, or global) was found."
+        )
+
+
 def _plot_metric(
     processed_data,
     env_name: str,
@@ -568,6 +890,21 @@ def main() -> None:
             task_name=args.task_name,
             metric_name=metric_name,
             output_dir=output_dir,
+        )
+
+    if args.plot_training_efficiency:
+        efficiency_records = _collect_training_efficiency_records(
+            json_files,
+            input_dir=input_dir,
+            algorithm_label_source=args.algorithm_label_source,
+            machine_id_override=args.machine_id,
+        )
+        baseline_map = _load_efficiency_baseline_map(args.efficiency_baseline_csv)
+        _plot_training_efficiency(
+            efficiency_records,
+            output_dir=output_dir,
+            explicit_baseline_map=baseline_map,
+            global_baseline=args.efficiency_global_baseline,
         )
 
 
