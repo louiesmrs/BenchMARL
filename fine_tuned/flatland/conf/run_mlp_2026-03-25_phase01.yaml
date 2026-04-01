@@ -1,7 +1,7 @@
 metadata:
-  source_hparams: fine_tuned/flatland/benchmark_runs/2026-03-25_17-00-46__curriculum/phase_01__delay_1_departure_0/ippo/ippo_flatland_mlp__ce2111ff_26_03_25-17_00_46/ippo_flatland_mlp__ce2111ff_26_03_25-17_00_46/texts/hparams0.txt
-  run_name: 2026-03-25_17-00-46__curriculum
-  phase: phase_01__delay_1_departure_0
+  source_hparams: fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_02__delay_0_departure_1/ippo/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/texts/hparams0.txt
+  run_name: 2026-03-31_08-06-33__curriculum
+  phase: phase_02__delay_0_departure_1
 
 environment_name: flatland
 continuous_actions: false
@@ -29,7 +29,7 @@ experiment:
   exploration_eps_end: 0.01
   exploration_anneal_frames: 1000000
   max_n_iters: null
-  max_n_frames: 5760000
+  max_n_frames: 7680000
   on_policy_collected_frames_per_batch: 24000
   on_policy_n_envs_per_worker: 240
   on_policy_n_minibatch_iters: 45
@@ -53,8 +53,8 @@ experiment:
   project_name: benchmarl
   wandb_extra_kwargs: {}
   create_json: true
-  save_folder: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-25_17-00-46__curriculum/phase_01__delay_1_departure_0/ippo
-  restore_file: null
+  save_folder: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_02__delay_0_departure_1/ippo
+  restore_file: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-31_08-06-33__curriculum/phase_01__delay_1_departure_0/ippo/ippo_flatland_mlp__d234c95b_26_03_31-08_06_33/checkpoints/checkpoint_3840000.pt
   restore_map_location: null
   checkpoint_interval: 2016000
   checkpoint_at_end: true
@@ -80,13 +80,13 @@ task_name: flatland
 task:
   map_width: 30
   map_height: 30
-  num_agents: 10
+  num_agents: 7
   num_steps: 1000
   reward_coefs:
     arrival_reward: 5
-    delay_reward: 1.0
+    delay_reward: 0
     shortest_path_reward: 0
-    departure_reward: 0.1
+    departure_reward: 1.0
     deadlock_penalty: 2.5
     arrival_delay_penalty: 0
   env_pickle: null

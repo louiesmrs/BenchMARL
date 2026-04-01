@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.util
+import json
 import pickle
 import re
+import statistics
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +56,15 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Optional folder root for evaluation logs. "
             "Defaults to <experiment_folder>/eval_<timestamp>."
+        ),
+    )
+    parser.add_argument(
+        "--evaluation-runs",
+        type=int,
+        default=1,
+        help=(
+            "Number of repeated evaluation runs. "
+            "A per-run CSV and an aggregate mean/std CSV will be written."
         ),
     )
     return parser.parse_args()
@@ -161,8 +173,86 @@ def _checkpoint_frame_count(checkpoint_file: Path) -> int:
     return int(m.group(1))
 
 
+def _find_eval_json(run_save_folder: Path, experiment_name: str) -> Path:
+    expected = run_save_folder / experiment_name / f"{experiment_name}.json"
+    if expected.exists():
+        return expected
+
+    candidates = sorted(run_save_folder.rglob("*.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No evaluation json found under {run_save_folder}")
+    return candidates[0]
+
+
+def _load_latest_step_metrics(json_path: Path) -> tuple[int, dict[str, float]]:
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    env = next(iter(data))
+    task = next(iter(data[env]))
+    algo = next(iter(data[env][task]))
+    seed = next(iter(data[env][task][algo]))
+    run_data = data[env][task][algo][seed]
+
+    step_keys = [k for k in run_data.keys() if k.startswith("step_")]
+    if not step_keys:
+        raise ValueError(f"No step_* keys found in {json_path}")
+    step_keys.sort(key=lambda k: int(k.split("_")[1]))
+    last_step_key = step_keys[-1]
+    step_payload = run_data[last_step_key]
+
+    metrics: dict[str, float] = {}
+    for key, value in step_payload.items():
+        if key == "step_count":
+            continue
+        if isinstance(value, list):
+            if not value:
+                continue
+            metrics[key] = float(statistics.fmean(float(v) for v in value))
+        elif isinstance(value, (int, float)):
+            metrics[key] = float(value)
+
+    return int(step_payload.get("step_count", 0)), metrics
+
+
+def _write_per_run_csv(path: Path, rows: list[dict[str, Any]], metric_keys: list[str]) -> None:
+    fieldnames = ["run_idx", "seed", "step_count", "json_path", *metric_keys]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _write_summary_csv(path: Path, rows: list[dict[str, Any]], metric_keys: list[str]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["metric", "n_runs", "mean", "std", "plus_minus"]
+        )
+        writer.writeheader()
+
+        for metric in metric_keys:
+            vals = [float(row[metric]) for row in rows if row.get(metric) is not None]
+            if not vals:
+                continue
+            mean_val = statistics.fmean(vals)
+            std_val = statistics.stdev(vals) if len(vals) > 1 else 0.0
+            writer.writerow(
+                {
+                    "metric": metric,
+                    "n_runs": len(vals),
+                    "mean": f"{mean_val:.6f}",
+                    "std": f"{std_val:.6f}",
+                    "plus_minus": f"{mean_val:.6f} ± {std_val:.6f}",
+                }
+            )
+
+
 def main() -> None:
     args = _parse_args()
+    if args.evaluation_runs < 1:
+        raise ValueError("--evaluation-runs must be >= 1")
+
     checkpoint_file = args.checkpoint_file.resolve()
     if not checkpoint_file.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_file}")
@@ -203,7 +293,7 @@ def main() -> None:
         experiment_config.render = args.render
 
     eval_save_folder = _resolve_eval_save_folder(checkpoint_file, args.save_folder)
-    experiment_config.save_folder = str(eval_save_folder)
+    checkpoint_experiment_name = checkpoint_file.parent.parent.name
 
     print("\nEvaluating with benchmark wiring\n")
     sb._print_hydra_config(
@@ -215,22 +305,55 @@ def main() -> None:
         seed=seed,
     )
 
-    experiment = Experiment(
-        task=task,
-        algorithm_config=algorithm_config,
-        model_config=model_config,
-        critic_model_config=critic_model_config,
-        seed=seed,
-        config=experiment_config,
-    )
+    per_run_rows: list[dict[str, Any]] = []
+    metric_keys_union: set[str] = set()
 
-    try:
-        experiment.evaluate()
-    finally:
-        experiment.close()
+    for run_idx in range(1, args.evaluation_runs + 1):
+        run_seed = seed + (run_idx - 1)
+        run_save_folder = eval_save_folder / f"run_{run_idx:03d}"
+        run_save_folder.mkdir(parents=True, exist_ok=True)
+        experiment_config.save_folder = str(run_save_folder)
+
+        print(
+            f"\n--- Evaluation run {run_idx}/{args.evaluation_runs} "
+            f"(seed={run_seed}) ---"
+        )
+        experiment = Experiment(
+            task=task,
+            algorithm_config=algorithm_config,
+            model_config=model_config,
+            critic_model_config=critic_model_config,
+            seed=run_seed,
+            config=experiment_config,
+        )
+
+        try:
+            experiment.evaluate()
+        finally:
+            experiment.close()
+
+        json_path = _find_eval_json(run_save_folder, checkpoint_experiment_name)
+        step_count, metrics = _load_latest_step_metrics(json_path)
+        metric_keys_union.update(metrics.keys())
+        row: dict[str, Any] = {
+            "run_idx": run_idx,
+            "seed": run_seed,
+            "step_count": step_count,
+            "json_path": str(json_path),
+        }
+        row.update(metrics)
+        per_run_rows.append(row)
+
+    metric_keys = sorted(metric_keys_union)
+    per_run_csv = eval_save_folder / "evaluation_runs.csv"
+    summary_csv = eval_save_folder / "evaluation_summary.csv"
+    _write_per_run_csv(per_run_csv, per_run_rows, metric_keys)
+    _write_summary_csv(summary_csv, per_run_rows, metric_keys)
 
     print("\nEvaluation complete.")
     print(f"Logs written under: {eval_save_folder}")
+    print(f"Per-run metrics CSV: {per_run_csv}")
+    print(f"Summary mean±std CSV: {summary_csv}")
 
 
 if __name__ == "__main__":
