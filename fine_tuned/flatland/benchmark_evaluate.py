@@ -17,14 +17,14 @@ sys.path.insert(0, str(BENCHMARL_ROOT))
 
 from benchmarl.experiment import Experiment
 
-SHORT_BENCHMARK_PATH = Path(__file__).resolve().parent / "short_benchmark.py"
+BENCHMARK_PATH = Path(__file__).resolve().parent / "benchmark.py"
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate checkpoints produced by short_benchmark.py / "
-            "short_benchmark_curriculum.py with the correct task/model wiring."
+            "Evaluate checkpoints produced by benchmark.py / "
+            "benchmark_curriculum.py with the correct task/model wiring."
         )
     )
     parser.add_argument("checkpoint_file", type=Path, help="Checkpoint .pt file")
@@ -58,12 +58,12 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_short_benchmark_module():
+def _load_benchmark_module():
     spec = importlib.util.spec_from_file_location(
-        "flatland_short_benchmark", SHORT_BENCHMARK_PATH
+        "flatland_benchmark", BENCHMARK_PATH
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"Could not import short_benchmark from {SHORT_BENCHMARK_PATH}")
+        raise ImportError(f"Could not import benchmark from {BENCHMARK_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -120,12 +120,12 @@ def _infer_model_name(model_config: Any) -> str:
                 if second.startswith("mlp"):
                     return "treelstm_mlp"
             if first.startswith("gnn") and second.startswith("mlp"):
-                return "gnn_mlp"
+                return "gnn"
 
     if name.startswith("lstm"):
-        return "lstm_mlp"
+        return "lstm"
     if name.startswith("gru"):
-        return "gru_mlp"
+        return "gru"
     if "mlp" in name:
         return "mlp"
 
@@ -167,7 +167,7 @@ def main() -> None:
     if not checkpoint_file.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_file}")
 
-    sb = _load_short_benchmark_module()
+    sb = _load_benchmark_module()
 
     (
         _experiment_folder,
@@ -205,7 +205,7 @@ def main() -> None:
     eval_save_folder = _resolve_eval_save_folder(checkpoint_file, args.save_folder)
     experiment_config.save_folder = str(eval_save_folder)
 
-    print("\nEvaluating with short_benchmark wiring\n")
+    print("\nEvaluating with benchmark wiring\n")
     sb._print_hydra_config(
         experiment_config=experiment_config,
         algorithm_config=algorithm_config,

@@ -24,9 +24,9 @@ DEFAULT_CURRICULUM = (
     Path(__file__).resolve().parent
     / "conf"
     / "curriculum"
-    / "short_benchmark_curriculum.yaml"
+    / "benchmark_curriculum.yaml"
 )
-SHORT_BENCHMARK_PATH = Path(__file__).resolve().parent / "short_benchmark.py"
+BENCHMARK_PATH = Path(__file__).resolve().parent / "benchmark.py"
 DEFAULT_CHECKPOINT_INTERVAL_FRAMES = 2_000_000
 
 
@@ -65,15 +65,13 @@ def _parse_args() -> argparse.Namespace:
         choices=[
             "mlp",
             "lstm",
-            "lstm_mlp",
             "gru",
-            "gru_mlp",
             "gnn",
-            "gnn_mlp",
             "treelstm",
-            "treeltsm",
             "treelstm_gru",
             "treelstm_mlp",
+            "treemlp",
+            "treegru",
             "treetransformer",
             "treegnn",
         ],
@@ -106,13 +104,13 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_short_benchmark_module():
+def _load_benchmark_module():
     spec = importlib.util.spec_from_file_location(
-        "flatland_short_benchmark", SHORT_BENCHMARK_PATH
+        "flatland_benchmark", BENCHMARK_PATH
     )
     if spec is None or spec.loader is None:
         raise ImportError(
-            f"Could not import short_benchmark module from {SHORT_BENCHMARK_PATH}"
+            f"Could not import benchmark module from {BENCHMARK_PATH}"
         )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -153,7 +151,7 @@ def _align_interval(desired_frames: int, frames_per_batch: int) -> int:
 
 
 def _make_run_dir(run_name: str | None) -> Path:
-    root = Path(__file__).resolve().parent / "short_benchmark_runs"
+    root = Path(__file__).resolve().parent / "benchmark_runs"
     root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     slug = _slug(run_name) if run_name else "curriculum"
@@ -211,8 +209,8 @@ def _load_weights_only_checkpoint(
 
 def main() -> None:
     args = _parse_args()
-    sb = _load_short_benchmark_module()
-    model_name = sb._normalize_model_name(args.model)
+    sb = _load_benchmark_module()
+    model_name = args.model
 
     curriculum_path = args.curriculum.resolve()
     if not curriculum_path.exists():

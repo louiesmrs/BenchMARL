@@ -1,8 +1,9 @@
 experiment:
   # Keep optimizer / clipping aligned with strong recurrent baselines.
   # Tree policies still drift late; reduce PPO update intensity for stability.
-  on_policy_minibatch_size: 800
-  on_policy_collected_frames_per_batch: 12000
+  on_policy_minibatch_size: 400
+  on_policy_collected_frames_per_batch: 6000
+  on_policy_n_envs_per_worker: 10
 
 algorithm:
   # Match baseline PPO weighting so value learning is not underweighted.

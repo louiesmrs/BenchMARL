@@ -49,7 +49,7 @@ def _parse_args() -> argparse.Namespace:
         "--input-dir",
         type=Path,
         default=None,
-        help="Benchmark batch folder to plot. Defaults to the latest run folder under short_benchmark_runs.",
+        help="Benchmark batch folder to plot. Defaults to the latest run folder under benchmark_runs.",
     )
     parser.add_argument(
         "--output-dir",
@@ -133,7 +133,7 @@ def _resolve_input_dir(input_dir: Path | None) -> Path:
             return latest
         return resolved
 
-    root_dir = Path("benchmarl_ext/fine_tuned/flatland/short_benchmark_runs").resolve()
+    root_dir = Path("benchmarl_ext/fine_tuned/flatland/benchmark_runs").resolve()
     run_dirs = _find_run_dirs(root_dir)
     if not run_dirs:
         raise FileNotFoundError(f"No benchmark run folders with manifest.yaml found under {root_dir}")

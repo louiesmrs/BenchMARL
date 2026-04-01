@@ -1,0 +1,112 @@
+metadata:
+  source_hparams: fine_tuned/flatland/benchmark_runs/2026-03-25_17-00-46__curriculum/phase_01__delay_1_departure_0/ippo/ippo_flatland_mlp__ce2111ff_26_03_25-17_00_46/ippo_flatland_mlp__ce2111ff_26_03_25-17_00_46/texts/hparams0.txt
+  run_name: 2026-03-25_17-00-46__curriculum
+  phase: phase_01__delay_1_departure_0
+
+environment_name: flatland
+continuous_actions: false
+on_policy: true
+seed: 0
+
+experiment:
+  sampling_device: cpu
+  train_device: cuda
+  buffer_device: cuda
+  share_policy_params: true
+  prefer_continuous_actions: false
+  collect_with_grad: false
+  parallel_collection: false
+  gamma: 0.99
+  lr: 5.0e-05
+  adam_eps: 1.0e-06
+  adam_extra_kwargs: {}
+  clip_grad_norm: true
+  clip_grad_val: 5
+  soft_target_update: true
+  polyak_tau: 0.005
+  hard_target_update_frequency: 5
+  exploration_eps_init: 0.8
+  exploration_eps_end: 0.01
+  exploration_anneal_frames: 1000000
+  max_n_iters: null
+  max_n_frames: 5760000
+  on_policy_collected_frames_per_batch: 24000
+  on_policy_n_envs_per_worker: 240
+  on_policy_n_minibatch_iters: 45
+  on_policy_minibatch_size: 1600
+  off_policy_collected_frames_per_batch: 6000
+  off_policy_n_envs_per_worker: 10
+  off_policy_n_optimizer_steps: 100
+  off_policy_train_batch_size: 100
+  off_policy_memory_size: 1000000
+  off_policy_init_random_frames: 0
+  off_policy_use_prioritized_replay_buffer: false
+  off_policy_prb_alpha: 0.6
+  off_policy_prb_beta: 0.4
+  evaluation: true
+  render: false
+  evaluation_interval: 360000
+  evaluation_episodes: 200
+  evaluation_deterministic_actions: true
+  evaluation_static: false
+  loggers: [tensorboard, csv]
+  project_name: benchmarl
+  wandb_extra_kwargs: {}
+  create_json: true
+  save_folder: /var/home/louie/code/BenchMARL/fine_tuned/flatland/benchmark_runs/2026-03-25_17-00-46__curriculum/phase_01__delay_1_departure_0/ippo
+  restore_file: null
+  restore_map_location: null
+  checkpoint_interval: 2016000
+  checkpoint_at_end: true
+  keep_checkpoints_num: null
+  exclude_buffer_from_checkpoint: false
+  evaluation_only: false
+  experiment_name: null
+  disable_value_estimator_vmap: false
+
+algorithm_name: ippo
+algorithm:
+  share_param_critic: true
+  clip_epsilon: 0.2
+  entropy_coef: 0.0005
+  critic_coef: 1.0
+  loss_critic_type: l2
+  lmbda: 0.9
+  scale_mapping: biased_softplus_1.0
+  use_tanh_normal: true
+  minibatch_advantage: true
+
+task_name: flatland
+task:
+  map_width: 30
+  map_height: 30
+  num_agents: 10
+  num_steps: 1000
+  reward_coefs:
+    arrival_reward: 5
+    delay_reward: 1.0
+    shortest_path_reward: 0
+    departure_reward: 0.1
+    deadlock_penalty: 2.5
+    arrival_delay_penalty: 0
+  env_pickle: null
+
+model_name: mlp
+model:
+  num_cells: [256, 256]
+  layer_class: torch.nn.Linear
+  activation_class: torch.nn.Tanh
+  activation_kwargs: null
+  norm_class: null
+  norm_kwargs: null
+  num_feature_dims: 1
+
+critic_model_name: mlp
+critic_model:
+  num_cells: [256, 256]
+  layer_class: torch.nn.Linear
+  activation_class: torch.nn.Tanh
+  activation_kwargs: null
+  norm_class: null
+  norm_kwargs: null
+  num_feature_dims: 1

@@ -20,8 +20,8 @@ from torchrl.envs import EnvBase
 from torchrl.envs.transforms import ExcludeTransform, Transform
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
-SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR = (
-    Path(__file__).resolve().parent / "conf" / "experiment" / "short_benchmark"
+BENCHMARK_EXPERIMENT_CONFIG_DIR = (
+    Path(__file__).resolve().parent / "conf" / "experiment" / "benchmark"
 )
 TREE_BASE_CONFIG_PATH = (
     Path(__file__).resolve().parent / "conf" / "experiment" / "base_tree.yaml"
@@ -44,6 +44,7 @@ from benchmarl.models import (
     FlatlandTreeLSTMCriticConfig,
     FlatlandTreeLSTMFeatureConfig,
     FlatlandTreeLSTMPolicyConfig,
+    FlatlandTreeTransformerFeatureConfig,
     FlatlandTreeTransformerCriticConfig,
     FlatlandTreeTransformerPolicyConfig,
     GnnConfig,
@@ -220,7 +221,7 @@ class FlatlandTreeHybridObservationTransform(Transform):
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a short Flatland benchmark for a selected model family."
+        description="Run a Flatland benchmark for a selected model family."
     )
     parser.add_argument(
         "--model",
@@ -228,15 +229,13 @@ def _parse_args() -> argparse.Namespace:
         choices=[
             "mlp",
             "lstm",
-            "lstm_mlp",
             "gru",
-            "gru_mlp",
             "gnn",
-            "gnn_mlp",
             "treelstm",
-            "treeltsm",
             "treelstm_gru",
             "treelstm_mlp",
+            "treemlp",
+            "treegru",
             "treetransformer",
             "treegnn",
         ],
@@ -250,16 +249,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _normalize_model_name(model_name: str) -> str:
-    aliases = {
-        "treeltsm": "treelstm",
-        "lstm": "lstm_mlp",
-        "gru": "gru_mlp",
-        "gnn": "gnn_mlp",
-    }
-    return aliases.get(model_name, model_name)
-
-
 def _resolve_train_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -269,7 +258,7 @@ def _resolve_train_device() -> str:
 
 
 def _make_run_folder(model_name: str, run_name: str | None) -> Path:
-    root = Path(__file__).resolve().parent / "short_benchmark_runs"
+    root = Path(__file__).resolve().parent / "benchmark_runs"
     root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     slug = run_name.strip().replace(" ", "_") if run_name else model_name
@@ -300,7 +289,7 @@ def _write_manifest(
         ],
         "seed": seed,
         "task": _serialize_config(task.config),
-        "experiment_config_dir": str(SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR),
+        "experiment_config_dir": str(BENCHMARK_EXPERIMENT_CONFIG_DIR),
         "experiment_by_algorithm": {
             name: _serialize_config(config)
             for name, config in experiment_configs_by_algorithm.items()
@@ -324,6 +313,8 @@ TREE_MODEL_NAMES = {
     "treelstm",
     "treelstm_gru",
     "treelstm_mlp",
+    "treemlp",
+    "treegru",
     "treetransformer",
     "treegnn",
 }
@@ -411,10 +402,10 @@ def _build_experiment_config(
     train_device = _resolve_train_device()
 
     base_overrides = _load_yaml_dict(
-        SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR / "base.yaml"
+        BENCHMARK_EXPERIMENT_CONFIG_DIR / "base.yaml"
     )
     algorithm_overrides = _load_yaml_dict(
-        SHORT_BENCHMARK_EXPERIMENT_CONFIG_DIR / f"{algorithm_name}.yaml"
+        BENCHMARK_EXPERIMENT_CONFIG_DIR / f"{algorithm_name}.yaml"
     )
 
     merged_overrides = {**base_overrides, **algorithm_overrides}
@@ -423,7 +414,7 @@ def _build_experiment_config(
 
     _apply_tree_experiment_overrides(config, model_name)
 
-    if model_name not in {"mlp", "lstm_mlp", "gru_mlp", "gnn_mlp"}:
+    if model_name not in {"mlp", "lstm", "gru", "gnn"}:
         config.disable_value_estimator_vmap = True
 
     algo_save_folder = run_dir / algorithm_name
@@ -471,7 +462,7 @@ def _print_hydra_config(
     print(yaml.safe_dump(payload, sort_keys=False))
 
 
-def _build_tree_task():
+def _build_tree_task(include_hybrid_observation: bool = True):
     task = FlatlandTask.FLATLAND.get_from_yaml()
     reward_coefs = dict(task.config.get("reward_coefs") or {})
     reward_coefs["delay_reward"] = 1
@@ -488,9 +479,10 @@ def _build_tree_task():
     def get_env_transforms(self, env: EnvBase):
         transforms = list(base_get_env_transforms(env))
         transforms.append(FlatlandTreeActionMaskTransform(agent_group=AGENT_GROUP))
-        transforms.append(
-            FlatlandTreeHybridObservationTransform(agent_group=AGENT_GROUP)
-        )
+        if include_hybrid_observation:
+            transforms.append(
+                FlatlandTreeHybridObservationTransform(agent_group=AGENT_GROUP)
+            )
         return transforms
 
     def action_mask_spec(self, env: EnvBase) -> Composite | None:
@@ -567,31 +559,33 @@ def _build_mlp_task():
 
 
 def _build_task(model_name: str):
-    if model_name in {"mlp", "lstm_mlp", "gru_mlp", "gnn_mlp"}:
+    if model_name in {"mlp", "lstm", "gru", "gnn"}:
         return _build_mlp_task()
-    return _build_tree_task()
+    if model_name in {"treemlp", "treegru"}:
+        return _build_tree_task(include_hybrid_observation=False)
+    return _build_tree_task(include_hybrid_observation=True)
 
 
 def _build_model_configs(model_name: str):
     model_root = BENCHMARL_ROOT / "benchmarl" / "conf" / "model" / "layers"
     if model_name == "mlp":
         return MlpConfig.get_from_yaml(), MlpConfig.get_from_yaml()
-    if model_name == "lstm_mlp":
+    if model_name == "lstm":
         return (
             LstmConfig.get_from_yaml(str(model_root / "lstm.yaml")),
             LstmConfig.get_from_yaml(str(model_root / "lstm.yaml")),
         )
-    if model_name == "gru_mlp":
+    if model_name == "gru":
         return (
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
             GruConfig.get_from_yaml(str(model_root / "gru.yaml")),
         )
-    if model_name == "gnn_mlp":
+    if model_name == "gnn":
         try:
             import torch_geometric
         except ImportError as err:
             raise ImportError(
-                "gnn_mlp requires torch_geometric to be installed."
+                "gnn requires torch_geometric to be installed."
             ) from err
 
         gnn_actor = GnnConfig.get_from_yaml(str(model_root / "gnn.yaml"))
@@ -678,6 +672,56 @@ def _build_model_configs(model_name: str):
         )
         _apply_tree_model_overrides(model_config, critic_model_config, model_name)
         return model_config, critic_model_config
+    if model_name == "treemlp":
+        tree_feature_path = model_root / "flatland_tree_transformer_feature.yaml"
+        mlp_path = model_root / "mlp.yaml"
+        intermediate_size = 128
+
+        model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeTransformerFeatureConfig.get_from_yaml(
+                    str(tree_feature_path)
+                ),
+                MlpConfig.get_from_yaml(str(mlp_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        critic_model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeTransformerFeatureConfig.get_from_yaml(
+                    str(tree_feature_path)
+                ),
+                MlpConfig.get_from_yaml(str(mlp_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
+        return model_config, critic_model_config
+    if model_name == "treegru":
+        tree_feature_path = model_root / "flatland_tree_transformer_feature.yaml"
+        gru_path = model_root / "gru.yaml"
+        intermediate_size = 128
+
+        model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeTransformerFeatureConfig.get_from_yaml(
+                    str(tree_feature_path)
+                ),
+                GruConfig.get_from_yaml(str(gru_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        critic_model_config = SequenceModelConfig(
+            model_configs=[
+                FlatlandTreeTransformerFeatureConfig.get_from_yaml(
+                    str(tree_feature_path)
+                ),
+                GruConfig.get_from_yaml(str(gru_path)),
+            ],
+            intermediate_sizes=[intermediate_size],
+        )
+        _apply_tree_model_overrides(model_config, critic_model_config, model_name)
+        return model_config, critic_model_config
     if model_name == "treetransformer":
         model_config = FlatlandTreeTransformerPolicyConfig.get_from_yaml(
             str(model_root / "flatland_tree_transformer.yaml")
@@ -701,7 +745,7 @@ def _build_model_configs(model_name: str):
 
 def main() -> None:
     args = _parse_args()
-    model_name = _normalize_model_name(args.model)
+    model_name = args.model
     run_dir = _make_run_folder(model_name=model_name, run_name=args.run_name)
 
     task = _build_task(model_name)

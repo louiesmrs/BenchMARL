@@ -560,6 +560,40 @@ class FlatlandTreeLSTMFeature(FlatlandTreeBase):
         return tensordict
 
 
+class FlatlandTreeTransformerFeature(FlatlandTreeBase):
+    """Tree-transformer Flatland feature extractor.
+
+    This module consumes the native Flatland tree observation and writes a learned
+    feature tensor to ``self.out_key``. It does not produce policy logits or values,
+    and it does not apply action masking.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(tree_encoder_type="transformer", **kwargs)
+        output_dim = self.output_leaf_spec.shape[-1]
+
+        self.feature_head = nn.Sequential(
+            nn.Linear(self.head_input_dim, self.hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, output_dim),
+        )
+        self.feature_skip = nn.Linear(self.head_input_dim, output_dim)
+
+        self.to(self.device)
+
+    def _forward(self, tensordict: TensorDictBase) -> TensorDictBase:
+        embedding, att_embedding = self.encoder(tensordict)
+        head_input = self._build_head_input(tensordict, embedding, att_embedding)
+        features = self.feature_head(head_input) + self.feature_skip(head_input)
+
+        self._diagnose_tensor("features", features)
+
+        if not self.output_has_agent_dim:
+            features = features.mean(dim=-2)
+        tensordict.set(self.out_key, features)
+        return tensordict
+
+
 class FlatlandTreeLSTMPolicy(FlatlandTreeBase):
     def __init__(self, **kwargs):
         super().__init__(tree_encoder_type="lstm", **kwargs)
@@ -720,6 +754,24 @@ class FlatlandTreeLSTMFeatureConfig(ModelConfig):
     @staticmethod
     def associated_class():
         return FlatlandTreeLSTMFeature
+
+
+@dataclass
+class FlatlandTreeTransformerFeatureConfig(ModelConfig):
+    hidden_size: int = MISSING
+    tree_embedding_size: int = MISSING
+    num_nodes: int = MISSING
+    num_edges: int = MISSING
+    agent_attr_size: int = MISSING
+    node_attr_size: int = MISSING
+    num_actions: int = MISSING
+    transformer_heads: int = MISSING
+    transformer_layers: int = MISSING
+    transformer_ff_mult: int = MISSING
+
+    @staticmethod
+    def associated_class():
+        return FlatlandTreeTransformerFeature
 
 
 @dataclass
