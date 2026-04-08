@@ -19,6 +19,10 @@ class TaskConfig:
     num_steps: int = 1000
     reward_coefs: Optional[dict] = None
     env_pickle: Optional[str] = None
+    tree_observation_backend: str = "flatland_cutils"
+    tree_num_nodes: int = 31
+    tree_predictor_depth: int = 500
+    tree_max_depth: int = 2
 
 
 class FlatlandClass(TaskClass):
@@ -33,12 +37,12 @@ class FlatlandClass(TaskClass):
             raise ValueError("Flatland task only supports discrete actions")
 
         def make_env():
-            from flatland_cutils import TreeObsForRailEnv as TreeCutils
             from flatland.envs.line_generators import SparseLineGen
             from flatland.envs.malfunction_generators import (
                 MalfunctionParameters,
                 ParamMalfunctionGen,
             )
+            from flatland.envs.observations import TreeObsForRailEnv as TreePython
             from flatland.envs.persistence import RailEnvPersister
             from flatland.envs.rail_generators import SparseRailGen
             from benchmarl.environments.flatland.torchrl_flatland_env import (
@@ -46,15 +50,45 @@ class FlatlandClass(TaskClass):
                 FlatlandTorchRLEnv,
             )
 
+            observation_backend = str(
+                self.config.get("tree_observation_backend", "flatland_cutils")
+            )
+            tree_num_nodes = int(self.config.get("tree_num_nodes", 31))
+            tree_predictor_depth = int(self.config.get("tree_predictor_depth", 500))
+            tree_max_depth = int(self.config.get("tree_max_depth", 2))
+
+            if observation_backend == "flatland_cutils":
+                try:
+                    from flatland_cutils import TreeObsForRailEnv as TreeCutils
+                except ImportError as err:
+                    raise ImportError(
+                        "tree_observation_backend=flatland_cutils requires flatland_cutils to be installed. "
+                        "Set tree_observation_backend=flatland to use the pure-python tree observation builder."
+                    ) from err
+                obs_builder = TreeCutils(tree_num_nodes, tree_predictor_depth)
+            elif observation_backend == "flatland":
+                obs_builder = TreePython(max_depth=tree_max_depth)
+            else:
+                raise ValueError(
+                    "Unknown tree_observation_backend='"
+                    f"{observation_backend}'. Expected one of: flatland_cutils, flatland"
+                )
+
             env_pickle = self.config.get("env_pickle")
             if env_pickle:
                 env, _ = RailEnvPersister.load_new(env_pickle)
-                env.obs_builder = TreeCutils(31, 500)
+                env.obs_builder = obs_builder
                 env.obs_builder.set_env(env)
-                td_env = FlatlandRailEnv.from_env(env, fixed_env=False)
+                td_env = FlatlandRailEnv.from_env(
+                    env,
+                    fixed_env=False,
+                    observation_backend=observation_backend,
+                    tree_num_nodes=tree_num_nodes,
+                )
                 td_env.set_reward_coef(self.config.get("reward_coefs"))
                 td_env.reset(regenerate_rail=True, regenerate_schedule=True)
-                return FlatlandTorchRLEnv(td_env)
+                torchrl_env = FlatlandTorchRLEnv(td_env)
+                return torchrl_env.to(device) if device is not None else torchrl_env
 
             td_env = FlatlandRailEnv(
                 number_of_agents=self.config.get("num_agents"),
@@ -72,11 +106,14 @@ class FlatlandClass(TaskClass):
                         malfunction_rate=1 / 4500, min_duration=20, max_duration=50
                     )
                 ),
-                obs_builder_object=TreeCutils(31, 500),
+                obs_builder_object=obs_builder,
+                observation_backend=observation_backend,
+                tree_num_nodes=tree_num_nodes,
             )
             td_env.set_reward_coef(self.config.get("reward_coefs"))
             td_env.reset()
-            return FlatlandTorchRLEnv(td_env)
+            torchrl_env = FlatlandTorchRLEnv(td_env)
+            return torchrl_env.to(device) if device is not None else torchrl_env
 
         return make_env
 

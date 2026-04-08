@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Optional
 
 import torch
 from torch import nn
+
+
+def _sdp_math_only_context(tensor: torch.Tensor):
+    if tensor.is_cuda:
+        return torch.backends.cuda.sdp_kernel(
+            enable_flash=False,
+            enable_mem_efficient=False,
+            enable_math=True,
+        )
+    return contextlib.nullcontext()
 
 
 class AgentAttentionBlock(nn.Module):
@@ -25,7 +36,8 @@ class AgentAttentionBlock(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        att_out, _ = self.attn(x, x, x)
+        with _sdp_math_only_context(x):
+            att_out, _ = self.attn(x, x, x)
         x = self.norm1(x + self.att_mlp(torch.cat([x, att_out], dim=-1)))
         x = self.norm2(x + self.ff(x))
         return x
@@ -254,7 +266,8 @@ class TreeTransformer(nn.Module):
             )
 
         input_data = self.input_linear(forest) + self.positional_proj(positional_encoding)
-        output = self.transformer_encoder(input_data)
+        with _sdp_math_only_context(input_data):
+            output = self.transformer_encoder(input_data)
         output = output.reshape(flat_batch, n_nodes * self.hidden_features)
         output = self.output_linear(output).reshape(batch_size, n_agents, -1)
         return self.norm(output)

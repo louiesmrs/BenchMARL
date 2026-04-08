@@ -1,1 +1,2 @@
 buffer_device: "train_device"
+sampling_device: "train_device"

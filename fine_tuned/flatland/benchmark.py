@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import functools
 import sys
+import warnings
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from math import prod
@@ -70,6 +71,13 @@ EXCLUDED_OBS_KEYS: tuple[str, ...] = (
     "valid_actions",
     "adjacency_offset",
     "positional_encoding",
+)
+ALGORITHM_ORDER: tuple[str, ...] = (
+    "ippo",
+    "mappo",
+    "masac",
+    "vdn",
+    "iql",
 )
 
 
@@ -159,9 +167,11 @@ class FlatlandMlpBenchmarkTransform(Transform):
         flat_dim = sum(
             int(prod(obs_spec[key].shape[agent_shape_len:])) for key in self.obs_keys
         )
+        spec_device = obs_spec[self.obs_keys[0]].device
         obs_spec["flat_observation"] = UnboundedContinuous(
             shape=(*obs_spec.shape, flat_dim),
             dtype=torch.float32,
+            device=spec_device,
         )
         group_spec["action_mask"] = obs_spec["valid_actions"].clone()
         return observation_spec
@@ -212,11 +222,32 @@ class FlatlandTreeHybridObservationTransform(Transform):
         flat_dim = sum(
             int(prod(obs_spec[key].shape[agent_shape_len:])) for key in self.obs_keys
         )
+        spec_device = obs_spec[self.obs_keys[0]].device
         obs_spec["flat_observation"] = UnboundedContinuous(
             shape=(*obs_spec.shape, flat_dim),
             dtype=torch.float32,
+            device=spec_device,
         )
         return observation_spec
+
+
+def _resolve_algorithm_names(algo: str) -> list[str]:
+    if algo == "all":
+        return list(ALGORITHM_ORDER)
+    return [algo]
+
+
+def _build_algorithm_config(algo_name: str):
+    builders = {
+        "ippo": IppoConfig,
+        "mappo": MappoConfig,
+        "masac": MasacConfig,
+        "vdn": VdnConfig,
+        "iql": IqlConfig,
+    }
+    if algo_name not in builders:
+        raise ValueError(f"Unknown algorithm: {algo_name}")
+    return builders[algo_name].get_from_yaml()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -240,6 +271,12 @@ def _parse_args() -> argparse.Namespace:
             "treegnn",
         ],
         help="Model family to benchmark. Defaults to mlp.",
+    )
+    parser.add_argument(
+        "--algo",
+        default="ippo",
+        choices=[*ALGORITHM_ORDER, "all"],
+        help="Algorithm to run (ippo/mappo/masac/vdn/iql) or 'all'.",
     )
     parser.add_argument(
         "--run-name",
@@ -401,9 +438,7 @@ def _build_experiment_config(
     config = ExperimentConfig.get_from_yaml()
     train_device = _resolve_train_device()
 
-    base_overrides = _load_yaml_dict(
-        BENCHMARK_EXPERIMENT_CONFIG_DIR / "base.yaml"
-    )
+    base_overrides = _load_yaml_dict(BENCHMARK_EXPERIMENT_CONFIG_DIR / "base.yaml")
     algorithm_overrides = _load_yaml_dict(
         BENCHMARK_EXPERIMENT_CONFIG_DIR / f"{algorithm_name}.yaml"
     )
@@ -584,9 +619,7 @@ def _build_model_configs(model_name: str):
         try:
             import torch_geometric
         except ImportError as err:
-            raise ImportError(
-                "gnn requires torch_geometric to be installed."
-            ) from err
+            raise ImportError("gnn requires torch_geometric to be installed.") from err
 
         gnn_actor = GnnConfig.get_from_yaml(str(model_root / "gnn.yaml"))
         gnn_actor.topology = "full"
@@ -751,12 +784,9 @@ def main() -> None:
     task = _build_task(model_name)
     model_config, critic_model_config = _build_model_configs(model_name)
 
+    algorithm_names = _resolve_algorithm_names(args.algo)
     algorithm_configs = [
-        IppoConfig.get_from_yaml(),
-        #  MappoConfig.get_from_yaml(),
-        #  MasacConfig.get_from_yaml(),
-        #  IqlConfig.get_from_yaml(),
-        #  VdnConfig.get_from_yaml(),
+        _build_algorithm_config(algo_name) for algo_name in algorithm_names
     ]
 
     for algorithm_config in algorithm_configs:

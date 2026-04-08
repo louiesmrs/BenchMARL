@@ -431,7 +431,20 @@ class FlatlandTreeBase(Model):
 
         return self.pre_head_norm(head_input)
 
+    @staticmethod
+    def _is_functorch_batched_tensor(tensor: torch.Tensor) -> bool:
+        functorch = getattr(torch._C, "_functorch", None)
+        if functorch is None:
+            return False
+        return bool(functorch.is_batchedtensor(tensor))
+
     def _diagnose_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        # Diagnostics are best-effort checks. Under functorch/vmap (e.g. MASAC
+        # target-Q evaluation), Python data-dependent control flow on batched
+        # tensors is unsupported. Skip diagnostics in that context.
+        if self._is_functorch_batched_tensor(tensor):
+            return
+
         if not torch.isfinite(tensor).all():
             raise RuntimeError(f"{self.__class__.__name__} produced non-finite {name}.")
 

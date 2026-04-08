@@ -13,3 +13,8 @@ reward_coefs:
   deadlock_penalty: 2.5
   arrival_delay_penalty: 0
 env_pickle: null
+
+tree_observation_backend: flatland_cutils  # one of: flatland_cutils, flatland
+tree_num_nodes: 31
+tree_predictor_depth: 500
+tree_max_depth: 2

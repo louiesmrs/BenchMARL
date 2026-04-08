@@ -13,6 +13,8 @@ from torchrl.data.tensor_specs import (
 )
 from torchrl.envs.common import EnvBase
 
+from benchmarl.environments.flatland.python_tree_adapter import FlatlandPythonTreeAdapter
+
 RewardCoefs = NamedTuple(
     "RewardCoefs",
     [
@@ -29,25 +31,57 @@ RewardCoefs = NamedTuple(
 class TDRailEnv(RailEnv):
     """Rail Env that accepts and returns TensorDicts."""
 
-    def __init__(self, *args, obs_only: bool = False, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        obs_only: bool = False,
+        observation_backend: str = "flatland_cutils",
+        tree_num_nodes: int = 31,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.reward_coefs: Optional[RewardCoefs] = None
         self.previous_deadlocked: set
         self.obs_only = obs_only
+        self.observation_backend = observation_backend
+        self.tree_adapter = FlatlandPythonTreeAdapter(max_nodes=tree_num_nodes)
 
-    def obs_to_td(self, obs_list: list) -> TensorDict:
+    def obs_to_td(self, observations) -> tuple[TensorDict, torch.Tensor]:
         num_agents = self.get_num_agents()
-        obs_td: TensorDict = TensorDict(
+        if self.observation_backend == "flatland_cutils":
+            obs_td: TensorDict = TensorDict(
+                {
+                    "agents_attr": torch.tensor(observations[0], dtype=torch.float32),
+                    "node_attr": torch.tensor(observations[1][0], dtype=torch.float32),
+                    "adjacency": torch.tensor(observations[1][1], dtype=torch.int64),
+                    "node_order": torch.tensor(observations[1][2], dtype=torch.int64),
+                    "edge_order": torch.tensor(observations[1][3], dtype=torch.int64),
+                },
+                [num_agents],
+            )
+            _, _, valid_actions = self.obs_builder.get_properties()
+            valid_actions = torch.tensor(valid_actions, dtype=torch.bool)
+            return obs_td, valid_actions
+
+        (
+            agents_attr,
+            node_attr,
+            adjacency,
+            node_order,
+            edge_order,
+            valid_actions,
+        ) = self.tree_adapter.encode(self, observations)
+        obs_td = TensorDict(
             {
-                "agents_attr": torch.tensor(obs_list[0], dtype=torch.float32),
-                "node_attr": torch.tensor(obs_list[1][0], dtype=torch.float32),
-                "adjacency": torch.tensor(obs_list[1][1], dtype=torch.int64),
-                "node_order": torch.tensor(obs_list[1][2], dtype=torch.int64),
-                "edge_order": torch.tensor(obs_list[1][3], dtype=torch.int64),
+                "agents_attr": torch.tensor(agents_attr, dtype=torch.float32),
+                "node_attr": torch.tensor(node_attr, dtype=torch.float32),
+                "adjacency": torch.tensor(adjacency, dtype=torch.int64),
+                "node_order": torch.tensor(node_order, dtype=torch.int64),
+                "edge_order": torch.tensor(edge_order, dtype=torch.int64),
             },
             [num_agents],
         )
-        return obs_td
+        return obs_td, torch.tensor(valid_actions, dtype=torch.bool)
 
     def reset(
         self,
@@ -64,7 +98,7 @@ class TDRailEnv(RailEnv):
         num_agents = self.get_num_agents()
         tensordict_out: TensorDict = TensorDict({}, batch_size=[])
         tensordict_out["agents"] = TensorDict({}, batch_size=[num_agents])
-        obs_td = self.obs_to_td(observations)
+        obs_td, valid_actions = self.obs_to_td(observations)
         if self.obs_only:
             obs_td = TensorDict(
                 {"agents_attr": obs_td.get("agents_attr")},
@@ -73,10 +107,7 @@ class TDRailEnv(RailEnv):
         tensordict_out["agents"]["observation"] = obs_td
 
         if not self.obs_only:
-            _, _, valid_actions = self.obs_builder.get_properties()
-            tensordict_out["agents"]["observation"]["valid_actions"] = torch.tensor(
-                valid_actions, dtype=torch.bool
-            )
+            tensordict_out["agents"]["observation"]["valid_actions"] = valid_actions
         tensordict_out["agents"]["reward"] = torch.zeros(
             num_agents, dtype=torch.float32
         )
@@ -99,12 +130,11 @@ class TDRailEnv(RailEnv):
             for handle, action in enumerate(tensordict["agents"]["action"].flatten())
         }
         observations, rewards, done, _ = super().step(actions)
-        _, _, valid_actions = self.obs_builder.get_properties()
         num_agents = self.get_num_agents()
 
         return_td: TensorDict = TensorDict({}, batch_size=[])
         return_td["agents"] = TensorDict({}, batch_size=[num_agents])
-        obs_td = self.obs_to_td(observations)
+        obs_td, valid_actions = self.obs_to_td(observations)
         if self.obs_only:
             obs_td = TensorDict(
                 {"agents_attr": obs_td.get("agents_attr")},
@@ -123,9 +153,7 @@ class TDRailEnv(RailEnv):
         return_td["agents"]["terminated"] = done_tensor.expand(num_agents, -1)
         return_td["reward"] = return_td["agents"]["reward"].mean().unsqueeze(0)
         if not self.obs_only:
-            return_td["agents"]["observation"]["valid_actions"] = torch.tensor(
-                valid_actions, dtype=torch.bool
-            )
+            return_td["agents"]["observation"]["valid_actions"] = valid_actions
         return return_td
 
     def update_step_rewards(self, i_agent: int) -> None:
@@ -290,8 +318,48 @@ class TorchRLRailEnv(EnvBase):
             shape=[],
         )
 
+    def _resolve_output_device(self, input_td: TensorDict | None = None):
+        if input_td is not None:
+            candidate_keys = (
+                "done",
+                "terminated",
+                "truncated",
+                "reset",
+                ("agents", "done"),
+                ("agents", "terminated"),
+                ("agents", "reset"),
+                ("next", "done"),
+                ("next", "terminated"),
+                ("next", "truncated"),
+            )
+            for key in candidate_keys:
+                tensor = input_td.get(key, None)
+                if isinstance(tensor, torch.Tensor):
+                    return tensor.device
+
+            if getattr(input_td, "device", None) is not None:
+                return input_td.device
+
+            for value in input_td.values(True, True):
+                if isinstance(value, torch.Tensor):
+                    return value.device
+
+        return getattr(self, "device", None)
+
+    @staticmethod
+    def _to_device_if_needed(tensordict: TensorDict, device):
+        if device is None:
+            return tensordict
+        return tensordict.to(device)
+
     def _reset(self, tensordict: TensorDict = None) -> TensorDict:
-        return self.env.reset()
+        out = self.env.reset()
+        return self._to_device_if_needed(
+            out, self._resolve_output_device(input_td=tensordict)
+        )
 
     def _step(self, tensordict: TensorDict) -> TensorDict:
-        return self.env.step(tensordict)
+        out = self.env.step(tensordict)
+        return self._to_device_if_needed(
+            out, self._resolve_output_device(input_td=tensordict)
+        )

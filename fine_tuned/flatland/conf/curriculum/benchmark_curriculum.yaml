@@ -6,6 +6,7 @@ phases:
       map_height: 30
       num_agents: 7
       num_steps: 1000
+      tree_observation_backend: flatland
       reward_coefs:
         arrival_reward: 5
         delay_reward: 1.0
@@ -21,6 +22,7 @@ phases:
       map_height: 30
       num_agents: 7
       num_steps: 1000
+      tree_observation_backend: flatland
       reward_coefs:
         arrival_reward: 5
         delay_reward: 0

@@ -16,7 +16,13 @@ import yaml
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BENCHMARL_ROOT))
 
-from benchmarl.algorithms import IppoConfig
+from benchmarl.algorithms import (
+    IppoConfig,
+    IqlConfig,
+    MappoConfig,
+    MasacConfig,
+    VdnConfig,
+)
 from benchmarl.benchmark import Benchmark
 from benchmarl.experiment import Experiment
 
@@ -27,13 +33,38 @@ DEFAULT_CURRICULUM = (
     / "benchmark_curriculum.yaml"
 )
 BENCHMARK_PATH = Path(__file__).resolve().parent / "benchmark.py"
-DEFAULT_CHECKPOINT_INTERVAL_FRAMES = 2_000_000
+ALGORITHM_ORDER: tuple[str, ...] = (
+    "ippo",
+    "mappo",
+    "masac",
+    "vdn",
+    "iql",
+)
+
+
+def _resolve_algorithm_names(algo: str) -> list[str]:
+    if algo == "all":
+        return list(ALGORITHM_ORDER)
+    return [algo]
+
+
+def _build_algorithm_config(algo_name: str):
+    builders = {
+        "ippo": IppoConfig,
+        "mappo": MappoConfig,
+        "masac": MasacConfig,
+        "vdn": VdnConfig,
+        "iql": IqlConfig,
+    }
+    if algo_name not in builders:
+        raise ValueError(f"Unknown algorithm: {algo_name}")
+    return builders[algo_name].get_from_yaml()
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run Flatland IPPO curriculum phases sequentially from checkpoints. "
+            "Run Flatland curriculum phases sequentially from checkpoints. "
             "Each phase continues from the previous phase checkpoint."
         )
     )
@@ -78,6 +109,13 @@ def _parse_args() -> argparse.Namespace:
         help="Model family to run for each curriculum phase.",
     )
     parser.add_argument(
+        "--algo",
+        type=str,
+        default="ippo",
+        choices=[*ALGORITHM_ORDER, "all"],
+        help="Algorithm to run (ippo/mappo/masac/vdn/iql) or 'all'.",
+    )
+    parser.add_argument(
         "--run-name",
         type=str,
         default=None,
@@ -105,13 +143,9 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _load_benchmark_module():
-    spec = importlib.util.spec_from_file_location(
-        "flatland_benchmark", BENCHMARK_PATH
-    )
+    spec = importlib.util.spec_from_file_location("flatland_benchmark", BENCHMARK_PATH)
     if spec is None or spec.loader is None:
-        raise ImportError(
-            f"Could not import benchmark module from {BENCHMARK_PATH}"
-        )
+        raise ImportError(f"Could not import benchmark module from {BENCHMARK_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -234,12 +268,25 @@ def main() -> None:
     if args.start_phase > 1 and initial_checkpoint is None:
         raise ValueError("--initial-checkpoint is required when --start-phase > 1")
 
+    algorithm_names = _resolve_algorithm_names(args.algo)
+    if len(algorithm_names) > 1:
+        if initial_checkpoint is not None:
+            raise ValueError(
+                "--initial-checkpoint is only supported when a single algorithm is selected."
+            )
+        if args.start_phase != 1:
+            raise ValueError(
+                "--start-phase > 1 is only supported when a single algorithm is selected."
+            )
+
     run_dir = _make_run_dir(args.run_name)
 
     manifest: dict[str, Any] = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "curriculum_yaml": str(curriculum_path),
         "model_name": model_name,
+        "algo_selection": args.algo,
+        "algorithms": algorithm_names,
         "weights_only": args.weights_only,
         "initial_checkpoint": str(initial_checkpoint)
         if initial_checkpoint is not None
@@ -247,167 +294,191 @@ def main() -> None:
         "start_phase": args.start_phase,
         "phases_total": len(phases),
         "run_dir": str(run_dir),
-        "phases": [],
+        "per_algorithm": {},
     }
+    if len(algorithm_names) == 1:
+        manifest["phases"] = []
     _write_manifest(run_dir / "manifest.yaml", manifest)
 
-    current_checkpoint: Path | None = initial_checkpoint
-    for idx in range(args.start_phase, len(phases) + 1):
-        phase = phases[idx - 1]
-        if not isinstance(phase, dict):
-            raise ValueError(f"Phase {idx} must be a mapping")
-
-        phase_name = str(phase.get("name") or f"phase_{idx}")
-        phase_slug = _slug(phase_name)
-        phase_dir = run_dir / f"phase_{idx:02d}__{phase_slug}"
-        phase_dir.mkdir(parents=True, exist_ok=False)
-
-        phase_frames = int(phase.get("total_timesteps", 0))
-        if phase_frames <= 0:
-            raise ValueError(
-                f"Phase {idx} has invalid total_timesteps={phase.get('total_timesteps')}"
-            )
-
-        task_overrides = phase.get("task", {})
-        if not isinstance(task_overrides, dict):
-            raise ValueError(f"Phase {idx} field 'task' must be a mapping")
-
-        exp_overrides = phase.get("experiment", {})
-        if not isinstance(exp_overrides, dict):
-            raise ValueError(f"Phase {idx} field 'experiment' must be a mapping")
-
-        base_frames = (
-            _checkpoint_frames(current_checkpoint)
-            if current_checkpoint is not None
-            else 0
+    for algorithm_name in algorithm_names:
+        algorithm_run_dir = (
+            run_dir if len(algorithm_names) == 1 else run_dir / algorithm_name
         )
-        target_frames = base_frames + phase_frames
+        algorithm_run_dir.mkdir(parents=True, exist_ok=True)
 
-        task = sb._build_task(model_name)
-        _deep_update(task.config, task_overrides)
+        current_checkpoint: Path | None = initial_checkpoint
+        phase_records: list[dict[str, Any]] = []
 
-        model_config, critic_model_config = sb._build_model_configs(model_name)
-        algorithm_config = IppoConfig.get_from_yaml()
-        if hasattr(algorithm_config, "minibatch_advantage"):
-            algorithm_config.minibatch_advantage = True
-        if hasattr(algorithm_config, "entropy_coef"):
-            algorithm_config.entropy_coef = 0.0005
-        sb._apply_tree_algorithm_overrides(algorithm_config, model_name)
+        for idx in range(args.start_phase, len(phases) + 1):
+            phase = phases[idx - 1]
+            if not isinstance(phase, dict):
+                raise ValueError(f"Phase {idx} must be a mapping")
 
-        experiment_config = sb._build_experiment_config(
-            model_name=model_name,
-            run_dir=phase_dir,
-            algorithm_name="ippo",
-        )
-        experiment_config.restore_file = (
-            str(current_checkpoint)
-            if (current_checkpoint is not None and not args.weights_only)
-            else None
-        )
-        experiment_config.max_n_frames = target_frames
-        experiment_config.evaluation_only = False
+            phase_name = str(phase.get("name") or f"phase_{idx}")
+            phase_slug = _slug(phase_name)
+            phase_dir = algorithm_run_dir / f"phase_{idx:02d}__{phase_slug}"
+            phase_dir.mkdir(parents=True, exist_ok=False)
 
-        # Default checkpointing policy for curriculum runs:
-        # save roughly every 2.0M frames (aligned to collector batch size), keep all.
-        frames_per_batch = int(experiment_config.on_policy_collected_frames_per_batch)
-        resolved_interval = _align_interval(
-            DEFAULT_CHECKPOINT_INTERVAL_FRAMES, frames_per_batch
-        )
-        if "checkpoint_interval" not in exp_overrides:
-            experiment_config.checkpoint_interval = resolved_interval
-        if "keep_checkpoints_num" not in exp_overrides:
-            experiment_config.keep_checkpoints_num = None
-
-        for key, value in exp_overrides.items():
-            if not hasattr(experiment_config, key):
+            phase_frames = int(phase.get("total_timesteps", 0))
+            if phase_frames <= 0:
                 raise ValueError(
-                    f"Phase {idx} experiment override '{key}' is not a valid ExperimentConfig field"
+                    f"Phase {idx} has invalid total_timesteps={phase.get('total_timesteps')}"
                 )
-            setattr(experiment_config, key, value)
 
-        print("\n" + "=" * 88)
-        print(f"Phase {idx}/{len(phases)}: {phase_name}")
-        print(
-            f"Start checkpoint: {current_checkpoint}"
-            if current_checkpoint is not None
-            else "Start checkpoint: <fresh start>"
-        )
-        if args.weights_only and current_checkpoint is not None:
-            print("Restore mode: weights-only (buffer/collector reset)")
-        print(f"Frames: base={base_frames}, add={phase_frames}, target={target_frames}")
-        print(
-            "Checkpoint interval: "
-            f"{experiment_config.checkpoint_interval} frames "
-            f"(requested≈{DEFAULT_CHECKPOINT_INTERVAL_FRAMES}, "
-            f"collector_batch={frames_per_batch})"
-        )
-        print(f"Output root: {phase_dir}")
+            task_overrides = phase.get("task", {})
+            if not isinstance(task_overrides, dict):
+                raise ValueError(f"Phase {idx} field 'task' must be a mapping")
 
-        sb._print_hydra_config(
-            experiment_config=experiment_config,
-            algorithm_config=algorithm_config,
-            task=task,
-            model_config=model_config,
-            critic_model_config=critic_model_config,
-            seed=0,
-        )
+            exp_overrides = phase.get("experiment", {})
+            if not isinstance(exp_overrides, dict):
+                raise ValueError(f"Phase {idx} field 'experiment' must be a mapping")
 
-        if args.weights_only and current_checkpoint is not None:
-            experiment = Experiment(
-                task=task,
+            base_frames = (
+                _checkpoint_frames(current_checkpoint)
+                if current_checkpoint is not None
+                else 0
+            )
+            target_frames = base_frames + phase_frames
+
+            task = sb._build_task(model_name)
+            _deep_update(task.config, task_overrides)
+
+            model_config, critic_model_config = sb._build_model_configs(model_name)
+            algorithm_config = _build_algorithm_config(algorithm_name)
+            if hasattr(algorithm_config, "minibatch_advantage"):
+                algorithm_config.minibatch_advantage = True
+            if hasattr(algorithm_config, "entropy_coef"):
+                algorithm_config.entropy_coef = 0.0005
+            sb._apply_tree_algorithm_overrides(algorithm_config, model_name)
+
+            experiment_config = sb._build_experiment_config(
+                model_name=model_name,
+                run_dir=phase_dir,
+                algorithm_name=algorithm_name,
+            )
+            experiment_config.restore_file = (
+                str(current_checkpoint)
+                if (current_checkpoint is not None and not args.weights_only)
+                else None
+            )
+            experiment_config.max_n_frames = target_frames
+            experiment_config.evaluation_only = False
+
+            # Default checkpointing policy for curriculum runs:
+            # save roughly every 2.0M frames (aligned to collector batch size), keep all.
+            frames_per_batch = int(
+                experiment_config.on_policy_collected_frames_per_batch
+            )
+            if "keep_checkpoints_num" not in exp_overrides:
+                experiment_config.keep_checkpoints_num = None
+
+            for key, value in exp_overrides.items():
+                if not hasattr(experiment_config, key):
+                    raise ValueError(
+                        f"Phase {idx} experiment override '{key}' is not a valid ExperimentConfig field"
+                    )
+                setattr(experiment_config, key, value)
+
+            print("\n" + "=" * 88)
+            print(
+                f"Algorithm {algorithm_name} | Phase {idx}/{len(phases)}: {phase_name}"
+            )
+            print(
+                f"Start checkpoint: {current_checkpoint}"
+                if current_checkpoint is not None
+                else "Start checkpoint: <fresh start>"
+            )
+            if args.weights_only and current_checkpoint is not None:
+                print("Restore mode: weights-only (buffer/collector reset)")
+            print(
+                f"Frames: base={base_frames}, add={phase_frames}, target={target_frames}"
+            )
+            print(
+                "Checkpoint interval: "
+                f"{experiment_config.checkpoint_interval} frames "
+                f"collector_batch={frames_per_batch})"
+            )
+            print(f"Output root: {phase_dir}")
+
+            sb._print_hydra_config(
+                experiment_config=experiment_config,
                 algorithm_config=algorithm_config,
+                task=task,
                 model_config=model_config,
                 critic_model_config=critic_model_config,
                 seed=0,
-                config=experiment_config,
             )
-            _load_weights_only_checkpoint(
-                experiment,
-                current_checkpoint,
-                map_location=experiment_config.restore_map_location,
-            )
-            experiment.run()
-        else:
-            benchmark = Benchmark(
-                algorithm_configs=[algorithm_config],
-                model_config=model_config,
-                critic_model_config=critic_model_config,
-                tasks=[task],
-                seeds={0},
-                experiment_config=experiment_config,
-            )
-            benchmark.run_sequential()
 
-        next_checkpoint = _latest_checkpoint_recursive(phase_dir)
-        if next_checkpoint is None:
-            raise RuntimeError(f"No checkpoint found under {phase_dir}")
+            if args.weights_only and current_checkpoint is not None:
+                experiment = Experiment(
+                    task=task,
+                    algorithm_config=algorithm_config,
+                    model_config=model_config,
+                    critic_model_config=critic_model_config,
+                    seed=0,
+                    config=experiment_config,
+                )
+                _load_weights_only_checkpoint(
+                    experiment,
+                    current_checkpoint,
+                    map_location=experiment_config.restore_map_location,
+                )
+                experiment.run()
+            else:
+                benchmark = Benchmark(
+                    algorithm_configs=[algorithm_config],
+                    model_config=model_config,
+                    critic_model_config=critic_model_config,
+                    tasks=[task],
+                    seeds={0},
+                    experiment_config=experiment_config,
+                )
+                benchmark.run_sequential()
 
-        phase_record = {
-            "phase_index": idx,
-            "phase_name": phase_name,
-            "input_checkpoint": str(current_checkpoint)
-            if current_checkpoint is not None
-            else None,
-            "output_folder": str(next_checkpoint.parent.parent),
-            "output_checkpoint": str(next_checkpoint),
-            "base_frames": base_frames,
-            "phase_timesteps": phase_frames,
-            "target_frames": target_frames,
-            "model_name": model_name,
-            "task_config": sb._serialize_config(task.config),
-            "experiment_overrides": exp_overrides,
-            "checkpoint_interval": experiment_config.checkpoint_interval,
-            "keep_checkpoints_num": experiment_config.keep_checkpoints_num,
-        }
-        manifest["phases"].append(phase_record)
-        _write_manifest(run_dir / "manifest.yaml", manifest)
+            next_checkpoint = _latest_checkpoint_recursive(phase_dir)
+            if next_checkpoint is None:
+                raise RuntimeError(f"No checkpoint found under {phase_dir}")
 
-        print(f"Completed phase {idx}: {next_checkpoint}")
-        current_checkpoint = next_checkpoint
+            phase_record = {
+                "algorithm": algorithm_name,
+                "phase_index": idx,
+                "phase_name": phase_name,
+                "input_checkpoint": str(current_checkpoint)
+                if current_checkpoint is not None
+                else None,
+                "output_folder": str(next_checkpoint.parent.parent),
+                "output_checkpoint": str(next_checkpoint),
+                "base_frames": base_frames,
+                "phase_timesteps": phase_frames,
+                "target_frames": target_frames,
+                "model_name": model_name,
+                "task_config": sb._serialize_config(task.config),
+                "experiment_overrides": exp_overrides,
+                "checkpoint_interval": experiment_config.checkpoint_interval,
+                "keep_checkpoints_num": experiment_config.keep_checkpoints_num,
+            }
+            phase_records.append(phase_record)
+            if len(algorithm_names) == 1:
+                manifest["phases"].append(phase_record)
+            manifest["per_algorithm"][algorithm_name] = {
+                "run_dir": str(algorithm_run_dir),
+                "initial_checkpoint": str(initial_checkpoint)
+                if initial_checkpoint is not None
+                else None,
+                "phases": phase_records,
+                "final_checkpoint": str(next_checkpoint),
+            }
+            _write_manifest(run_dir / "manifest.yaml", manifest)
+
+            print(f"Completed {algorithm_name} phase {idx}: {next_checkpoint}")
+            current_checkpoint = next_checkpoint
+
+        print(
+            f"Completed algorithm '{algorithm_name}'. Final checkpoint: {current_checkpoint}"
+        )
 
     print("\nCurriculum complete.")
     print(f"Run folder: {run_dir}")
-    print(f"Final checkpoint: {current_checkpoint}")
 
 
 if __name__ == "__main__":

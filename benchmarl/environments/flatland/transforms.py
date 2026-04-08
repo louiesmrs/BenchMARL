@@ -81,11 +81,16 @@ class FlatlandTreePreprocessor(Transform):
         num_nodes = num_edges + 1
         positional_dim = num_nodes * self.branching_factor
 
+        spec_device = adjacency_spec.device
         obs_spec["adjacency_offset"] = UnboundedDiscrete(
-            shape=adjacency_shape, dtype=torch.int64
+            shape=adjacency_shape,
+            dtype=torch.int64,
+            device=spec_device,
         )
         obs_spec["positional_encoding"] = UnboundedContinuous(
-            shape=(*obs_spec.shape, num_nodes, positional_dim), dtype=torch.float32
+            shape=(*obs_spec.shape, num_nodes, positional_dim),
+            dtype=torch.float32,
+            device=spec_device,
         )
         return observation_spec
 
