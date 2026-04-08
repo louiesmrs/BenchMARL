@@ -158,6 +158,24 @@ def _parse_args() -> argparse.Namespace:
             "Defaults to host parsed from event files, else platform.node()."
         ),
     )
+    parser.add_argument(
+        "--plot-phases-combined",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Overlay curriculum phases on a single frame axis. For input folders containing "
+            "multiple algorithms and two phases, each metric plot will include lines like "
+            "mappo_phase1, mappo_phase2, ippo_phase1, ippo_phase2."
+        ),
+    )
+    parser.add_argument(
+        "--phase-algorithm",
+        type=str,
+        default=None,
+        help=(
+            "Optional algorithm filter for --plot-phases-combined (e.g. mappo)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -541,6 +559,207 @@ def _save_current_figure(path: Path) -> None:
     print(f"Wrote {path}")
 
 
+def _safe_read_scalar_indexed(path: Path) -> dict[int, float]:
+    if not path.exists():
+        return {}
+    values: dict[int, float] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            try:
+                idx = int(float(row[0]))
+                val = float(row[1])
+            except ValueError:
+                continue
+            values[idx] = val
+    return values
+
+
+def _phase_sort_key(phase_name: str) -> tuple[int, str]:
+    match = re.match(r"^phase_(\d+)", phase_name)
+    if match:
+        return (int(match.group(1)), phase_name)
+    return (10**9, phase_name)
+
+
+def _phase_short_label(phase_name: str) -> str:
+    match = re.match(r"^phase_(\d+)", phase_name)
+    if not match:
+        return phase_name
+    return f"phase{int(match.group(1))}"
+
+
+def _extract_phase_algo_labels(path: Path, input_dir: Path) -> tuple[str | None, str | None]:
+    rel = path.resolve().relative_to(input_dir.resolve())
+    parts = rel.parts
+
+    phase_idx = None
+    for i, part in enumerate(parts):
+        if part.startswith("phase_"):
+            phase_idx = i
+            break
+
+    if phase_idx is None:
+        if input_dir.name.startswith("phase_") and len(parts) >= 1:
+            return input_dir.name, parts[0]
+        return None, None
+
+    phase = parts[phase_idx]
+    if phase_idx > 0:
+        algo = parts[phase_idx - 1]
+    elif phase_idx + 1 < len(parts):
+        algo = parts[phase_idx + 1]
+    else:
+        algo = None
+    return phase, algo
+
+
+def _aligned_scalar_series(frames_csv: Path, values_csv: Path) -> tuple[list[float], list[float]]:
+    frames_by_idx = _safe_read_scalar_indexed(frames_csv)
+    values_by_idx = _safe_read_scalar_indexed(values_csv)
+    if not frames_by_idx or not values_by_idx:
+        return [], []
+
+    shared_idxs = sorted(set(frames_by_idx.keys()) & set(values_by_idx.keys()))
+    if not shared_idxs:
+        return [], []
+
+    x = [frames_by_idx[i] for i in shared_idxs]
+    y = [values_by_idx[i] for i in shared_idxs]
+    return x, y
+
+
+def _continuous_phase_frames(series_by_phase: list[tuple[str, list[float], list[float]]]):
+    adjusted: list[tuple[str, list[float], list[float]]] = []
+    prev_last: float | None = None
+
+    for phase_name, x, y in series_by_phase:
+        if not x:
+            adjusted.append((phase_name, x, y))
+            continue
+
+        x_adj = list(x)
+        if prev_last is not None and x_adj[0] <= prev_last:
+            positive_diffs = [
+                x_adj[i] - x_adj[i - 1]
+                for i in range(1, len(x_adj))
+                if x_adj[i] > x_adj[i - 1]
+            ]
+            step = statistics.median(positive_diffs) if positive_diffs else 1.0
+            shift = (prev_last + step) - x_adj[0]
+            x_adj = [v + shift for v in x_adj]
+
+        prev_last = x_adj[-1]
+        adjusted.append((phase_name, x_adj, y))
+
+    return adjusted
+
+
+def _plot_combined_phases(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    algorithm_filter: str | None,
+) -> None:
+    metric_files = {
+        "arrival_ratio": "eval_info_arrival_ratio_mean.csv",
+        "deadlock_ratio": "eval_info_deadlock_ratio_mean.csv",
+        "return": "eval_reward_episode_reward_mean.csv",
+        "training_time": "timers_total_time.csv",
+    }
+
+    scalar_roots = [
+        p
+        for p in sorted(input_dir.rglob("scalars"))
+        if p.is_dir() and (p / "counters_total_frames.csv").exists()
+    ]
+
+    grouped: dict[str, dict[str, Path]] = {}
+    for scalars_dir in scalar_roots:
+        phase, algo = _extract_phase_algo_labels(scalars_dir, input_dir)
+        if phase is None or algo is None:
+            continue
+        if algorithm_filter is not None and algo != algorithm_filter:
+            continue
+        grouped.setdefault(algo, {})[phase] = scalars_dir
+
+    if not grouped:
+        print(
+            "No phase/algo scalar runs discovered for combined-phase plotting "
+            f"under {input_dir}."
+        )
+        return
+
+    out_dir = output_dir / "combined_phases"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric_name, metric_csv in metric_files.items():
+        all_lines: list[tuple[str, list[float], list[float]]] = []
+
+        for algo, phase_to_dir in sorted(grouped.items()):
+            ordered_phases = sorted(phase_to_dir.keys(), key=_phase_sort_key)
+            per_algo_series: list[tuple[str, list[float], list[float]]] = []
+            for phase_name in ordered_phases:
+                scalars_dir = phase_to_dir[phase_name]
+                x, y = _aligned_scalar_series(
+                    scalars_dir / "counters_total_frames.csv",
+                    scalars_dir / metric_csv,
+                )
+                if x and y:
+                    per_algo_series.append((phase_name, x, y))
+
+            if len(per_algo_series) < 2:
+                continue
+
+            for phase_name, x_adj, y in _continuous_phase_frames(per_algo_series):
+                label = f"{algo}_{_phase_short_label(phase_name)}"
+                all_lines.append((label, x_adj, y))
+
+        if not all_lines:
+            continue
+
+        if metric_name == "training_time":
+            # Use a bar chart for training time (phase duration per algo/phase line)
+            labels: list[str] = []
+            durations_s: list[float] = []
+            for label, _, y in all_lines:
+                if not y:
+                    continue
+                duration = y[-1] - y[0] if len(y) > 1 else y[-1]
+                labels.append(label)
+                durations_s.append(float(duration))
+
+            if not labels:
+                continue
+
+            plt.close("all")
+            fig, ax = plt.subplots(figsize=(10.5, 5.5))
+            ax.bar(labels, durations_s)
+            ax.set_xlabel("algo_phase")
+            ax.set_ylabel("training_time_seconds")
+            ax.set_title("Combined curriculum phases (training_time)")
+            ax.tick_params(axis="x", rotation=20)
+            ax.grid(True, axis="y", alpha=0.2)
+            fig.tight_layout()
+            _save_current_figure(out_dir / f"combined_all_algorithms_{metric_name}.png")
+            continue
+
+        plt.close("all")
+        fig, ax = plt.subplots(figsize=(10.5, 5.5))
+        for label, x, y in all_lines:
+            ax.plot(x, y, linewidth=2.0, label=label)
+
+        ax.set_xlabel("frames")
+        ax.set_ylabel(metric_name)
+        ax.set_title(f"Combined curriculum phases ({metric_name})")
+        ax.legend(loc="best")
+        ax.grid(True, alpha=0.2)
+        fig.tight_layout()
+        _save_current_figure(out_dir / f"combined_all_algorithms_{metric_name}.png")
+
+
 def _safe_read_scalar_values(path: Path) -> list[float]:
     if not path.exists():
         return []
@@ -883,12 +1102,7 @@ def _plot_metric(
 
 def main() -> None:
     args = _parse_args()
-    if importlib.util.find_spec("marl_eval") is None:
-        raise ImportError(
-            "marl_eval is not installed. Run this script with:\n"
-            "  uv run --with id-marl-eval --with 'numpy<2' "
-            "python fine_tuned/flatland/flatland_eval_plots.py"
-        )
+    has_marl_eval = importlib.util.find_spec("marl_eval") is not None
 
     input_dir = _resolve_input_dir(args.input_dir)
     output_dir = (
@@ -897,6 +1111,25 @@ def main() -> None:
         else input_dir / "marl_eval_flatland"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.plot_phases_combined:
+        _plot_combined_phases(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            algorithm_filter=args.phase_algorithm,
+        )
+
+    if not has_marl_eval:
+        if args.plot_phases_combined:
+            print(
+                "marl_eval is not installed; generated only --plot-phases-combined outputs."
+            )
+            return
+        raise ImportError(
+            "marl_eval is not installed. Run this script with:\n"
+            "  uv run --with id-marl-eval --with 'numpy<2' "
+            "python fine_tuned/flatland/flatland_eval_plots.py"
+        )
 
     discovered_json_files = _find_json_files(input_dir, output_dir)
     if not discovered_json_files:
