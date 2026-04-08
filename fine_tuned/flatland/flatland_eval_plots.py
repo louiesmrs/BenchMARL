@@ -104,6 +104,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rebase-resumed-step-counts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When normalizing step keys, also rebase step_count to a phase-local axis for "
+            "resumed runs (detected when original step keys start at step_K with K>0). "
+            "This keeps the x-axis aligned with plotted points for phase-only folders."
+        ),
+    )
+    parser.add_argument(
         "--truncate-to-shortest",
         action="store_true",
         help=(
@@ -313,8 +323,20 @@ def _rename_single_algo_payload(data: Dict, algo_alias: str) -> Dict:
     return payload
 
 
-def _normalize_step_keys_payload(data: Dict) -> Dict:
+def _step_index_or_none(step_key: str) -> int | None:
+    match = re.match(r"^step_(\d+)$", step_key)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _normalize_step_keys_payload(
+    data: Dict,
+    *,
+    rebase_resumed_step_counts: bool,
+) -> tuple[Dict, int]:
     payload = copy.deepcopy(data)
+    rebased_runs = 0
 
     for env_data in payload.values():
         if not isinstance(env_data, dict):
@@ -338,6 +360,20 @@ def _normalize_step_keys_payload(data: Dict) -> Dict:
                         continue
 
                     step_items.sort(key=lambda item: _step_sort_key(item[0]))
+                    first_step_idx = _step_index_or_none(step_items[0][0])
+                    rebase_offset: float | int = 0
+                    should_rebase = bool(
+                        rebase_resumed_step_counts
+                        and first_step_idx is not None
+                        and first_step_idx > 0
+                    )
+                    if should_rebase:
+                        first_step_count = step_items[0][1].get("step_count")
+                        if isinstance(first_step_count, (int, float)):
+                            rebase_offset = first_step_count
+                        else:
+                            should_rebase = False
+
                     non_step_items = [
                         (k, v)
                         for k, v in run_data.items()
@@ -348,11 +384,22 @@ def _normalize_step_keys_payload(data: Dict) -> Dict:
                     for k, v in non_step_items:
                         normalized_run[k] = v
                     for idx, (_, step_payload) in enumerate(step_items):
-                        normalized_run[f"step_{idx}"] = step_payload
+                        normalized_step_payload = copy.deepcopy(step_payload)
+                        if should_rebase:
+                            step_count = normalized_step_payload.get("step_count")
+                            if isinstance(step_count, (int, float)):
+                                rebased = step_count - rebase_offset
+                                if isinstance(step_count, int):
+                                    rebased = int(round(rebased))
+                                normalized_step_payload["step_count"] = rebased
+
+                        normalized_run[f"step_{idx}"] = normalized_step_payload
 
                     algo_data[seed] = normalized_run
+                    if should_rebase:
+                        rebased_runs += 1
 
-    return payload
+    return payload, rebased_runs
 
 
 def _iter_run_dicts(payload: Dict) -> Iterable[Dict]:
@@ -421,6 +468,7 @@ def _merge_json_dicts(
     input_dir: Path,
     algorithm_label_source: str,
     normalize_step_keys: bool,
+    rebase_resumed_step_counts: bool,
     truncate_to_shortest: bool,
     json_output_file: Path,
 ) -> Dict:
@@ -443,7 +491,14 @@ def _merge_json_dicts(
                 data = _rename_single_algo_payload(data, alias)
 
         if normalize_step_keys:
-            data = _normalize_step_keys_payload(data)
+            data, rebased_runs = _normalize_step_keys_payload(
+                data,
+                rebase_resumed_step_counts=rebase_resumed_step_counts,
+            )
+            if rebased_runs > 0:
+                print(
+                    f"Rebased step_count for {rebased_runs} resumed run(s) in {path}"
+                )
 
         prepared_payloads.append(data)
 
@@ -870,6 +925,7 @@ def main() -> None:
         input_dir=input_dir,
         algorithm_label_source=args.algorithm_label_source,
         normalize_step_keys=args.normalize_step_keys,
+        rebase_resumed_step_counts=args.rebase_resumed_step_counts,
         truncate_to_shortest=args.truncate_to_shortest,
         json_output_file=merged_json,
     )

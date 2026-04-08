@@ -9,6 +9,7 @@ import pickle
 import re
 import statistics
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -157,12 +158,15 @@ def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 def _resolve_eval_save_folder(
     checkpoint_file: Path,
     save_folder_arg: Path | None,
+    env_pickle: Path | None = None,
 ) -> Path:
     if save_folder_arg is not None:
         root = save_folder_arg.resolve()
     else:
         experiment_folder = checkpoint_file.parent.parent.resolve()
-        root = experiment_folder / f"eval_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        suffix = f"__{env_pickle.stem}" if env_pickle is not None else ""
+        root = experiment_folder / f"eval_{timestamp}{suffix}"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -298,15 +302,16 @@ def main() -> None:
     task = sb._build_task(model_name)
     _deep_update(task.config, task_config)
 
+    env_pickle_path: Path | None = None
     if args.env_pickle is not None:
-        env_pickle = args.env_pickle.resolve()
-        if not env_pickle.exists():
-            raise FileNotFoundError(f"env-pickle not found: {env_pickle}")
+        env_pickle_path = args.env_pickle.resolve()
+        if not env_pickle_path.exists():
+            raise FileNotFoundError(f"env-pickle not found: {env_pickle_path}")
 
         from flatland.envs.persistence import RailEnvPersister
 
-        env, _ = RailEnvPersister.load_new(str(env_pickle))
-        task.config["env_pickle"] = str(env_pickle)
+        env, _ = RailEnvPersister.load_new(str(env_pickle_path))
+        task.config["env_pickle"] = str(env_pickle_path)
         task.config["num_agents"] = int(env.get_num_agents())
 
     experiment_config.restore_file = str(checkpoint_file)
@@ -337,7 +342,11 @@ def main() -> None:
     if args.render is not None:
         experiment_config.render = args.render
 
-    eval_save_folder = _resolve_eval_save_folder(checkpoint_file, args.save_folder)
+    eval_save_folder = _resolve_eval_save_folder(
+        checkpoint_file,
+        args.save_folder,
+        env_pickle=env_pickle_path,
+    )
     checkpoint_experiment_name = checkpoint_file.parent.parent.name
 
     print("\nEvaluating with benchmark wiring\n")
@@ -379,13 +388,22 @@ def main() -> None:
             config=experiment_config,
         )
 
+        eval_start = time.perf_counter()
         try:
             experiment.evaluate()
         finally:
             experiment.close()
+        eval_wall_seconds = time.perf_counter() - eval_start
 
         json_path = _find_eval_json(run_save_folder, checkpoint_experiment_name)
         step_count, metrics = _load_latest_step_metrics(json_path)
+
+        episodes = int(experiment_config.evaluation_episodes)
+        eval_seconds_per_episode = (
+            eval_wall_seconds / episodes if episodes > 0 else float("nan")
+        )
+        metrics["eval_seconds_per_episode"] = float(eval_seconds_per_episode)
+
         metric_keys_union.update(metrics.keys())
         row: dict[str, Any] = {
             "run_idx": run_idx,

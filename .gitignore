@@ -178,3 +178,4 @@ cython_debug/
 
 **/*_benchmark_runs/*
 **/benchmark_runs/*
+**/eval_sweeps/*
