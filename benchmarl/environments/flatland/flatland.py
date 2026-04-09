@@ -28,11 +28,12 @@ class TaskConfig:
 class FlatlandClass(TaskClass):
     def get_env_fun(
         self,
-        _num_envs: int,
+        num_envs: int,
         continuous_actions: bool,
         seed: Optional[int],
         device: str,
     ):
+        _ = num_envs  # API contract: accepted for parity with other tasks.
         if continuous_actions:
             raise ValueError("Flatland task only supports discrete actions")
 
