@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
 import importlib.util
-import math
 import re
 import sys
 from datetime import datetime
@@ -174,14 +174,6 @@ def _latest_checkpoint_recursive(root: Path) -> Path | None:
         return None
     candidates.sort(key=lambda x: (x[0], x[1]))
     return candidates[-1][2]
-
-
-def _align_interval(desired_frames: int, frames_per_batch: int) -> int:
-    if desired_frames <= 0:
-        return 0
-    if frames_per_batch <= 0:
-        raise ValueError(f"frames_per_batch must be positive, got {frames_per_batch}")
-    return int(math.ceil(desired_frames / frames_per_batch) * frames_per_batch)
 
 
 def _make_run_dir(run_name: str | None) -> Path:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -15,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import yaml
 
 BENCHMARL_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BENCHMARL_ROOT))

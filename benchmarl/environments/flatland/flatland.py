@@ -28,7 +28,7 @@ class TaskConfig:
 class FlatlandClass(TaskClass):
     def get_env_fun(
         self,
-        num_envs: int,
+        _num_envs: int,
         continuous_actions: bool,
         seed: Optional[int],
         device: str,

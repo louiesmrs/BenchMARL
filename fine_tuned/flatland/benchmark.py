@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
 import functools
 import sys
-import warnings
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from math import prod
