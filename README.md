@@ -10,6 +10,52 @@
 [![Discord Shield](https://dcbadge.limes.pink/api/server/https://discord.gg/jEEWCn6T3p)](https://discord.gg/jEEWCn6T3p)
 [![arXiv](https://img.shields.io/badge/arXiv-2312.01472-b31b1b.svg)](https://arxiv.org/abs/2312.01472)
 
+## Flatland quickstart (`fine_tuned/flatland`)
+
+### 1) Install `uv`
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 2) Create and activate a virtual environment
+```bash
+uv venv .venv --python 3.10
+source .venv/bin/activate
+```
+
+### 3) Install dependencies
+```bash
+# Install BenchMARL + Flatland deps from this repo
+uv pip install -e .
+```
+
+```
+
+### 4) Run Flatland scripts
+
+Single benchmark:
+```bash
+uv run python fine_tuned/flatland/benchmark.py --model treetransformer --algo ippo
+```
+
+Curriculum benchmark:
+```bash
+uv run python fine_tuned/flatland/benchmark_curriculum.py --model treetransformer --algo ippo
+```
+
+Evaluate a checkpoint:
+```bash
+uv run python fine_tuned/flatland/benchmark_evaluate.py \
+  fine_tuned/flatland/benchmark_runs/<run>/phase_01__.../ippo/.../checkpoints/checkpoint_<frames>.pt \
+  --evaluation-episodes 200
+```
+
+Generate plots for a run folder:
+```bash
+uv run python fine_tuned/flatland/flatland_eval_plots.py \
+  --input-dir fine_tuned/flatland/benchmark_runs/<run_folder>
+```
+
 ```bash
 python benchmarl/run.py algorithm=mappo task=vmas/balance
 ```
