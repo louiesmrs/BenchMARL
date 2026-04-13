@@ -29,8 +29,6 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-```
-
 ### 4) Run Flatland scripts
 
 Single benchmark:
